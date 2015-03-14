@@ -3,7 +3,8 @@
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2015-03-11 20:24:37 jcl>
+;; Time-stamp: <2015-03-14 20:09:02 jcl>
+;; Version: 6
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -28,8 +29,6 @@
 (require 'cl-lib)
 (require 'time-date)
 (require 'picpocket)
-(require 'jcl-ert)
-
 
 (defconst picp-test-files (list "blue.svg" "green.svg" "red.svg"))
 (defconst picp-test-tree-files (list "cold/blue.svg" "green.svg" "warm/red.svg"))
@@ -144,17 +143,6 @@ warm/red.svg"
 
 
 ;;; Help functions.
-
-(defun picp-test-until-you-fail ()
-  (interactive)
-  (remove-hook 'jcl-midnite-hook #'jcl-ert-all)
-  (message (cl-loop for n = 0 then (1+ n)
-                    for stat = (ert '(tag :picpocket))
-                    unless (zerop (ert--stats-failed-unexpected stat))
-                    return (format "%s laps before failure" n)
-                    do (message "lap %s" n)
-                    unless (sit-for 1)
-                    return (format "%s laps before interupt" (1+ n)))))
 
 (defun picp-should-be-reset ()
   (list (should (eq picp-list nil))
