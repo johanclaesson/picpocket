@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2015-03-15 11:24:24 jcl>
-;; Version: 7
+;; Time-stamp: <2015-03-15 11:28:48 jcl>
+;; Version: 8
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -172,8 +172,6 @@
 
 ;; NICE
 ;; * See quit-window.  Should quit-restore delete full-screen frame?
-;; * Does the frequent use of "&optional pics" makes any sense?
-;;   And maybe rename pics to pic everywhere while you are at it.
 ;; * Toggle cheat window.  A 20 char wide window displaying
 ;;   key-bindings in a compact format.  Bound to ? instead of
 ;;   describe-mode.
@@ -333,58 +331,58 @@ hang.")
               size
               (rotation 0.0))
 
-(defsubst picp-pic (pics)
-  (car (or pics picp-current)))
+(defsubst picp-pic (pic)
+  (car (or pic picp-current)))
 
 
-(defsubst picp-prev (&optional pics)
-  (picp-pic-prev (picp-pic pics)))
+(defsubst picp-prev (&optional pic)
+  (picp-pic-prev (picp-pic pic)))
 
-(defsubst picp-dir (&optional pics)
-  (picp-pic-dir (picp-pic pics)))
+(defsubst picp-dir (&optional pic)
+  (picp-pic-dir (picp-pic pic)))
 
-(defsubst picp-file (&optional pics)
-  (picp-pic-file (picp-pic pics)))
+(defsubst picp-file (&optional pic)
+  (picp-pic-file (picp-pic pic)))
 
-(defsubst picp-sha (&optional pics)
-  (picp-pic-sha (picp-pic pics)))
+(defsubst picp-sha (&optional pic)
+  (picp-pic-sha (picp-pic pic)))
 
-(defsubst picp-width (&optional pics)
-  (picp-pic-width (picp-pic pics)))
+(defsubst picp-width (&optional pic)
+  (picp-pic-width (picp-pic pic)))
 
-(defsubst picp-height (&optional pics)
-  (picp-pic-height (picp-pic pics)))
+(defsubst picp-height (&optional pic)
+  (picp-pic-height (picp-pic pic)))
 
-(defsubst picp-size (&optional pics)
-  (picp-pic-size (picp-pic pics)))
+(defsubst picp-size (&optional pic)
+  (picp-pic-size (picp-pic pic)))
 
-(defsubst picp-rotation (&optional pics)
-  (picp-pic-rotation (picp-pic pics)))
+(defsubst picp-rotation (&optional pic)
+  (picp-pic-rotation (picp-pic pic)))
 
 
-(defsubst picp-set-prev (pics value)
-  (setf (picp-pic-prev (picp-pic pics)) value))
+(defsubst picp-set-prev (pic value)
+  (setf (picp-pic-prev (picp-pic pic)) value))
 
-(defsubst picp-set-dir (pics value)
-  (setf (picp-pic-dir (picp-pic pics)) value))
+(defsubst picp-set-dir (pic value)
+  (setf (picp-pic-dir (picp-pic pic)) value))
 
-(defsubst picp-set-file (pics value)
-  (setf (picp-pic-file (picp-pic pics)) value))
+(defsubst picp-set-file (pic value)
+  (setf (picp-pic-file (picp-pic pic)) value))
 
-(defsubst picp-set-sha (pics value)
-  (setf (picp-pic-sha (picp-pic pics)) value))
+(defsubst picp-set-sha (pic value)
+  (setf (picp-pic-sha (picp-pic pic)) value))
 
-(defsubst picp-set-width (pics value)
-  (setf (picp-pic-width (picp-pic pics)) value))
+(defsubst picp-set-width (pic value)
+  (setf (picp-pic-width (picp-pic pic)) value))
 
-(defsubst picp-set-height (pics value)
-  (setf (picp-pic-height (picp-pic pics)) value))
+(defsubst picp-set-height (pic value)
+  (setf (picp-pic-height (picp-pic pic)) value))
 
-(defsubst picp-set-size (pics value)
-  (setf (picp-pic-size (picp-pic pics)) value))
+(defsubst picp-set-size (pic value)
+  (setf (picp-pic-size (picp-pic pic)) value))
 
-(defsubst picp-set-rotation (pics value)
-  (setf (picp-pic-rotation (picp-pic pics)) value))
+(defsubst picp-set-rotation (pic value)
+  (setf (picp-pic-rotation (picp-pic pic)) value))
 
 
 ;;; Macros
@@ -989,19 +987,19 @@ space-separated string."
                                           :file file
                                           :size (picp-file-size file))
                  collect pic))
-  (cl-loop for pics on picp-list
+  (cl-loop for pic on picp-list
            with prev = nil
-           do (picp-set-prev pics prev)
-           do (setq prev pics))
+           do (picp-set-prev pic prev)
+           do (setq prev pic))
   (setq picp-length (length picp-list))
   (unless (and selected-file
                (string-match (picp-image-regexp) selected-file)
-               (cl-loop for pics on picp-list
+               (cl-loop for pic on picp-list
                         for index = 1 then (1+ index)
                         when (equal selected-file
-                                    (concat (picp-dir pics) (picp-file pics)))
+                                    (concat (picp-dir pic) (picp-file pic)))
                         return (setq picp-index index
-                                     picp-current pics)))
+                                     picp-current pic)))
     (setq picp-index 1
           picp-current picp-list)))
 
@@ -1014,22 +1012,22 @@ space-separated string."
 ;; This checksum is refered to as sha and is used as index in the
 ;; database below.
 
-(defun picp-tags (&optional pics)
-  (picp-db-tags (picp-safe-sha pics)))
+(defun picp-tags (&optional pic)
+  (picp-db-tags (picp-safe-sha pic)))
 
-(defun picp-tags-set (pics new-tags)
-  (picp-db-tags-set (picp-safe-sha pics)
-                    (picp-path pics)
+(defun picp-tags-set (pic new-tags)
+  (picp-db-tags-set (picp-safe-sha pic)
+                    (picp-path pic)
                     new-tags))
 
-(defun picp-tags-move-file (pics old-file new-file)
-  (picp-db-tags-move-file (picp-safe-sha pics) old-file new-file))
+(defun picp-tags-move-file (pic old-file new-file)
+  (picp-db-tags-move-file (picp-safe-sha pic) old-file new-file))
 
-(defun picp-tags-copy-file (pics new-file)
-  (picp-db-tags-copy-file (picp-safe-sha pics) new-file))
+(defun picp-tags-copy-file (pic new-file)
+  (picp-db-tags-copy-file (picp-safe-sha pic) new-file))
 
-(defun picp-tags-delete-file (pics deleted-file)
-  (picp-db-tags-delete-file (picp-safe-sha pics) deleted-file))
+(defun picp-tags-delete-file (pic deleted-file)
+  (picp-db-tags-delete-file (picp-safe-sha pic) deleted-file))
 
 (defun picp-add-tag (tag-string &optional pic)
   "Add a tag to current picture or the picture given as argument.
@@ -1044,30 +1042,30 @@ and PIC the picture."
 
 (defun picp-add-tag-to-all (tag-string)
   "Add a tag (TAG-STRING) to all pictures in current picpocket buffer."
-  (cl-loop for pics on picp-list
-           do (picp-add-tag tag-string pics))
+  (cl-loop for pic on picp-list
+           do (picp-add-tag tag-string pic))
   (message "All tagged with %s." tag-string))
 
 (defun picp-remove-tag-from-all (tag-string)
   "Remove a tag (TAG-STRING) from all pictures in current picpocket buffer."
   (cl-loop with tag = (intern tag-string)
-           for pics on picp-list
-           for tags = (picp-tags pics)
-           do (when (memq tag (picp-tags pics))
-                (picp-tags-set pics (delq tag tags))))
+           for pic on picp-list
+           for tags = (picp-tags pic)
+           do (when (memq tag (picp-tags pic))
+                (picp-tags-set pic (delq tag tags))))
   (message "Tag %s remove from all." tag-string))
 
-(defun picp-safe-sha (&optional pics)
-  "Return the sha1 checksum of PICS.
+(defun picp-safe-sha (&optional pic)
+  "Return the sha1 checksum of PIC.
 The checksum will be computed if not already available.
 Also, if there is a matching entry in the database with tags
-then the file of PICS will be added to that entry."
-  (let ((sha (picp-sha pics))
-        (file (picp-path pics)))
+then the file of PIC will be added to that entry."
+  (let ((sha (picp-sha pic))
+        (file (picp-path pic)))
     (unless sha
       (setq sha (picp-sha1sum file))
       (let ((inhibit-quit t))
-        (picp-set-sha pics sha)
+        (picp-set-sha pic sha)
         (picp-db-tags-add-file sha file)))
     sha))
 
@@ -1672,10 +1670,10 @@ be called."
 (defun picp-compute-sha (resume-function state)
   (with-current-buffer picp-buffer
     (let ((i 0))
-      (cl-loop for pics on (or state picp-list)
-               do (picp-safe-sha pics)
+      (cl-loop for pic on (or state picp-list)
+               do (picp-safe-sha pic)
                do (cl-incf i)
-               until (funcall resume-function pics)))))
+               until (funcall resume-function pic)))))
 
 (defun picp-maybe-save-journal (&rest ignored)
   (when (> (picp-db-journal-size) 100)
@@ -1707,12 +1705,12 @@ be called."
 
 (defun picp-look-ahead-more2 (resume-function)
   ;; PENDING - look ahead backward if last command was picp-prev?
-  (cl-loop for pics on picp-current
+  (cl-loop for pic on picp-current
            for count = 0 then (1+ count)
            until (funcall resume-function nil)
            finally return count
            repeat picp-look-ahead-max
-           do (picp-look-ahead pics
+           do (picp-look-ahead pic
                                picp-width
                                picp-height)))
 
@@ -1817,13 +1815,13 @@ be called."
   (list picp-width picp-height))
 
   
-(defun picp-image-size (pics)
-  (image-size (create-image (picp-path pics) 'imagemagick) t))
+(defun picp-image-size (pic)
+  (image-size (create-image (picp-path pic) 'imagemagick) t))
 
-(defun picp-create-image (pics window-width window-height)
+(defun picp-create-image (pic window-width window-height)
   (let* ((window-ratio (/ (float window-width)
                           window-height))
-         (width-height (picp-image-size pics))
+         (width-height (picp-image-size pic))
          (pic-width (car width-height))
          (pic-height (cdr width-height))
          (pic-ratio (/ (float pic-width) pic-height))
@@ -1834,9 +1832,9 @@ be called."
           (setq size-value window-height))
       (setq size-param :width)
       (setq size-value window-width))
-    (create-image (picp-path pics)
+    (create-image (picp-path pic)
                   'imagemagick nil
-                  :rotation (picp-rotation pics)
+                  :rotation (picp-rotation pic)
                   size-param size-value)))
 ;; :foreground "white"
 ;; :background "black"
@@ -1844,21 +1842,21 @@ be called."
 
 
 
-(defun picp-insert (pics)
+(defun picp-insert (pic)
   (unless (eq (current-buffer) (get-buffer picp-buffer))
     (error "Not in picpocket buffer"))
   (let (buffer-read-only)
     (erase-buffer)
-    (when pics
+    (when pic
       (if (display-images-p)
           (cl-destructuring-bind (window-width window-height)
               (picp-width-and-height)
-            (insert-image (picp-create-image pics window-width window-height)))
+            (insert-image (picp-create-image pic window-width window-height)))
         (insert "\n\nThis display does not support images.")))
     (goto-char (point-min))))
 
-(defun picp-look-ahead (pics window-width window-height)
-  (image-size (picp-create-image pics window-width window-height)
+(defun picp-look-ahead (pic window-width window-height)
+  (image-size (picp-create-image pic window-width window-height)
               t
               (if (and picp-frame
                        (frame-live-p picp-frame))
@@ -2255,10 +2253,10 @@ DST is the destination directory."
     (insert-file-contents-literally file)
     (buffer-string)))
 
-(defun picp-path (&optional pics)
-  (unless pics
-    (setq pics picp-current))
-  (concat (picp-dir pics) (picp-file pics)))
+(defun picp-path (&optional pic)
+  (unless pic
+    (setq pic picp-current))
+  (concat (picp-dir pic) (picp-file pic)))
 
   
 (defun picp-warn (format &rest args)
