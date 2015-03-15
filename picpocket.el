@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2015-03-14 20:09:02 jcl>
-;; Version: 6
+;; Time-stamp: <2015-03-15 11:24:24 jcl>
+;; Version: 7
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -46,6 +46,8 @@
 ;; k         - Delete image file.
 ;; t         - Edit tags.
 ;; s         - Slide-show mode.
+;; [         - Rotate counter-clockwise.
+;; ]         - Rotate clockwise.
 ;; e         - Customize keystrokes (see below).
 ;; TAB f     - Toggle full-screen.
 ;; TAB r     - Toggle recursive inclusion of images in sub-directories.
@@ -136,8 +138,8 @@
 ;;; Code:
 
 ;; TODO.
-;; * Scale and rotate commands.
-;; ** In 24.4 image-mode have scale/rotate etc.
+;; * defvar -> defcustom where appropriate.
+;; * Scale commands.
 ;; * Activate picp-look-ahead-more
 ;; ** Maybe implement resume timers for it
 ;; * Logical operators for filters
@@ -167,7 +169,6 @@
 ;; * PENDING comments.
 ;; * Idle timer that computes index/max for filter and puts it in
 ;;   header line.
-;; * defvar -> defcustom where appropriate.
 
 ;; NICE
 ;; * See quit-window.  Should quit-restore delete full-screen frame?
@@ -329,7 +330,8 @@ hang.")
               sha
               width
               height
-              size)
+              size
+              (rotation 0.0))
 
 (defsubst picp-pic (pics)
   (car (or pics picp-current)))
@@ -356,6 +358,9 @@ hang.")
 (defsubst picp-size (&optional pics)
   (picp-pic-size (picp-pic pics)))
 
+(defsubst picp-rotation (&optional pics)
+  (picp-pic-rotation (picp-pic pics)))
+
 
 (defsubst picp-set-prev (pics value)
   (setf (picp-pic-prev (picp-pic pics)) value))
@@ -378,7 +383,11 @@ hang.")
 (defsubst picp-set-size (pics value)
   (setf (picp-pic-size (picp-pic pics)) value))
 
+(defsubst picp-set-rotation (pics value)
+  (setf (picp-pic-rotation (picp-pic pics)) value))
 
+
+;;; Macros
 
 (defmacro picp-time-string (&rest forms)
   (declare (indent defun))
@@ -396,6 +405,8 @@ hang.")
          (list ,rc (format "%d.%03d_%03ds"
                            (+ (lsh sec-hi 16) sec-low) (/ micro 1000) (% micro 1000)))))))
 
+
+;;; Picp mode
 
 (define-derived-mode picp-mode special-mode "picpocket"
   (buffer-disable-undo)
@@ -514,10 +525,31 @@ hang.")
 
 ;;; Picpocket mode commands.
 
+(defun picp-rotate-counter-clockwise (&optional prefix-arg)
+  "Display the current picture rotated 90 degrees to the left.
+This command do not change the image file on disk.  With
+PREFIX-ARG read a number in the minibuffer and set rotation to
+that."
+  (interactive "P")
+  (picp-rotate -90.0 prefix-arg))
 
-(defun picp-rotate-counter-clockwise ()
-  "Asdfasfasfasf."
-  (interactive))
+(defun picp-rotate-clockwise (&optional prefix-arg)
+  "Display the current picture rotated 90 degrees to the right.
+This command do not change the image file on disk.  With
+PREFIX-ARG read a number in the minibuffer and set rotation to
+that."
+  (interactive "P")
+  (picp-rotate 90.0 prefix-arg)
+  (picp-update-buffer))
+
+(defun picp-rotate (delta prefix-arg)
+  (let ((degrees (if prefix-arg
+                     (float (read-number "Set rotation in degrees"
+                                         (picp-rotation)))
+                   (+ (picp-rotation) delta))))
+    (picp-set-rotation picp-current degrees)
+    (picp-update-buffer)))
+
 
 (defun picp-set-backdrop ()
   "Attempt to install the current picture as desktop backdrop."
@@ -1795,19 +1827,19 @@ be called."
          (pic-width (car width-height))
          (pic-height (cdr width-height))
          (pic-ratio (/ (float pic-width) pic-height))
-         param value)
+         size-param size-value)
     (if (> window-ratio pic-ratio)
         (progn
-          (setq param :height)
-          (setq value window-height))
-      (setq param :width)
-      (setq value window-width))
+          (setq size-param :height)
+          (setq size-value window-height))
+      (setq size-param :width)
+      (setq size-value window-width))
     (create-image (picp-path pics)
                   'imagemagick nil
-                  ;; :foreground "white"
-                  ;; :background "black"
-                  ;; :mask '(heuristic (0 0 0))
-                  param value)))
+                  :rotation (picp-rotation pics)
+                  size-param size-value)))
+;; :foreground "white"
+;; :background "black"
 
 
 
