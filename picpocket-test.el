@@ -3,8 +3,8 @@
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2015-03-15 11:28:48 jcl>
-;; Version: 8
+;; Time-stamp: <2015-04-12 22:09:24 jcl>
+;; Version: 9
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -50,7 +50,7 @@
                    when dir
                    collect dir)
           (list "manga-dir/")))
-  
+
 
 ;;; Macros
 
@@ -70,7 +70,7 @@
 ;; (declare (debug ((symbolp form) body))
 ;; (indent defun))
 ;; `(picp-with-test-dir-macro ,(cons '(picp-ensure-only-test-files) body)))
-;; 
+;;
 ;; (defmacro picp-with-test-dir-lax (&rest body)
 ;; (declare (debug ((symbolp form) body))
 ;; (indent defun))
@@ -88,13 +88,13 @@
           (picp-db-journal-size 0)
           (picp-inhibit-timers t)
           (picp-demote-warnings t)
-          (picp-move-relative-to-cwd t)
+          (picp-dst-dir-is-cwd t)
           (picp-recursive t)
           (default-directory picp-test-dir))
      (make-directory picp-test-dir t)
      (unwind-protect
-         (picp-ensure-only-test-files)
-         (prog1
+         (prog2
+             (picp-ensure-only-test-files)
              (progn ,@body)
            (picp-check-only-expected-files))
        (when picp-delete-dir-after-test
@@ -227,15 +227,15 @@ warm/red.svg"
 (ert-deftest picp-tree-add-tag-to-all ()
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
-    (list (picp-time (picp-add-tag-to-all "manga"))
+    (list (picp-time (picp-tag-to-all "manga"))
           (should (equal (picp-tags) '(manga)))
           (should (equal (picp-tags (cdr picp-current)) '(manga)))
           (should (equal (picp-tags (cddr picp-current)) '(manga))))))
 
-(ert-deftest picp-add-tag-to-all ()
+(ert-deftest picp-tag-to-all ()
   :tags '(:picpocket)
   (picp-with-test-buffer
-    (list (picp-time (picp-add-tag-to-all "manga"))
+    (list (picp-time (picp-tag-to-all "manga"))
           (should (equal (picp-tags) '(manga)))
           (should (equal (picp-tags (cdr picp-current)) '(manga)))
           (should (equal (picp-tags (cddr picp-current)) '(manga))))))
@@ -258,7 +258,7 @@ warm/red.svg"
     (list (picp-time
             (picp-previous)
             (picp-add-tag "manga")
-            (picp-copy "../warm"))
+            (picp-action 'copy "../warm"))
           (should (equal 3 picp-length))
           (should (equal 3 (length picp-list)))
           (should (equal (picp-dir) (file-truename default-directory)))
@@ -267,10 +267,6 @@ warm/red.svg"
           (should (file-exists-p "blue.svg"))
           (with-current-buffer (picp-revert)
             (should (equal 4 picp-length))))))
-          
-            
-          
-
 
 (ert-deftest picp-tree-move-outside-tree ()
   :tags '(:picpocket)
@@ -281,11 +277,10 @@ warm/red.svg"
       (let* ((outside (file-name-as-directory (make-temp-file "picp-test-" t)))
              (outside-blue (concat outside "blue.svg")))
         (unwind-protect
-            (list (picp-move-current outside)
+            (list (picp-action 'move outside)
                   (should (file-exists-p outside-blue)))
           (delete-file outside-blue)
           (delete-directory outside))))))
-
 
 (ert-deftest picp-tree-add-and-clear-tag ()
   :tags '(:picpocket)
@@ -349,7 +344,7 @@ warm/red.svg"
             (should (eq (cdr picp-list) picp-current))
             (should (equal 3 picp-length))
             (should (equal 2 picp-index))))))
-            
+
 
 (ert-deftest picp-add-tag-delete-file ()
   :tags '(:picpocket)
@@ -390,17 +385,45 @@ warm/red.svg"
           (picp-dump)
           (picp-should-be-reset))))
 
+(ert-deftest picp-move-all ()
+  :tags '(:picpocket)
+  (picp-with-test-buffer
+    (list (picp-move-all "warm")
+          (should (not picp-current))
+          (should (eq (+ 2 3) (length (directory-files "warm")))))))
+
+(ert-deftest picp-copy-all ()
+  :tags '(:picpocket)
+  (picp-with-test-buffer
+    (list (picp-next)
+          (picp-copy-all "warm")
+          (should (eq 3 (length picp-list)))
+          (should (eq (+ 2 3) (length (directory-files "warm")))))))
+
+(ert-deftest picp-hard-link-all ()
+  :tags '(:picpocket)
+  (picp-with-test-buffer
+    (list (picp-end)
+          (picp-hard-link-all "warm")
+          (should (eq 3 (length picp-list)))
+          (should (eq (+ 2 3) (length (directory-files "warm")))))))
+
+
 
 (ert-deftest picp-file-count ()
   :tags '(:picpocket)
   (list (picp-with-test-dir
-          (list (should (eq 3 (picp-file-count-with-timeout default-directory 10)))
+          (list (should (eq 3 (picp-file-count-with-timeout default-directory
+                                                            10)))
                 (should (equal (cons 'interrupted 0)
-                               (picp-file-count-with-timeout default-directory 0)))))
+                               (picp-file-count-with-timeout default-directory
+                                                             0)))))
         (picp-with-test-dir-tree
-          (list (should (eq 3 (picp-file-count-with-timeout default-directory 10)))
+          (list (should (eq 3 (picp-file-count-with-timeout default-directory
+                                                            10)))
                 (should (equal (cons 'interrupted 0)
-                               (picp-file-count-with-timeout default-directory 0)))))))
+                               (picp-file-count-with-timeout default-directory
+                                                             0)))))))
 
 (ert-deftest picp-file-count-estimate ()
   :tags '(:picpocket)
@@ -413,7 +436,7 @@ warm/red.svg"
   (picp-db-put "1" "Some data")
   (picp-db-put "2" "Some more data")
   (picp-db-put "1" nil))
-  
+
 (defun picp-db-verify-test-data ()
   (should (equal "Some more data" (picp-db-get "2"))))
 
@@ -431,7 +454,7 @@ warm/red.svg"
 (ert-deftest picp-db-put-get-test ()
   (picp-with-test-db
     (picp-db-verify-test-data)))
-    
+
 (ert-deftest picp-db-read-database-file-test ()
   (picp-with-test-db
     (picp-db-save)
@@ -570,4 +593,4 @@ warm/red.svg"
 (provide 'picpocket-test)
 
 ;;; picpocket-test.el ends here
- 
+
