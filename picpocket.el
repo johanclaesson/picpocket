@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2015-04-12 22:09:24 jcl>
-;; Version: 9
+;; Time-stamp: <2015-04-18 14:05:51 jcl>
+;; Version: 10
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -263,7 +263,7 @@ to do this is to define it with `defcustom' like this:
 
 (defvar picp-header-line-format '(:eval (picp-header-line)))
 (defvar picp-header-full-path nil)
-(defvar picp-dired-when-no-images nil)
+(defvar picp-dired-when-no-images-p nil)
 (defvar picp-look-ahead-max 5)
 (defvar picp-ask-before-delete t)
 
@@ -544,47 +544,68 @@ that."
 
 
 (defvar picp-fit :width-and-height)
-(defvar picp-scale 1.0)
+(defvar picp-scale 100)
 
-;; PENDING - Prefix arg let enter scale.
-;; PENDING - Move over predefined list of scale factors.
-(defun picp-scale-in ()
-  (interactive)
-  (setq picp-scale (* picp-scale 1.25))
-  (message "Scaling factor is %s" picp-scale)
+(defun picp-scale-in (arg)
+  "Zoom in 10%.
+With prefix arg (ARG) read scale percent in minibuffer."
+  (interactive "P")
+  (if arg
+      (setq picp-scale (read-number "Scale factor: " picp-scale))
+    (picp-alter-scale 10))
   (picp-update-buffer))
 
-(defun picp-scale-out ()
-  (interactive)
-  (setq picp-scale (* picp-scale 0.8))
-  (message "Scaling factor is %s" picp-scale)
+(defun picp-scale-out (arg)
+  "Zoom out 10%.
+With prefix arg (ARG) read scale percent in minibuffer."
+  (interactive "P")
+  (if arg
+      (setq picp-scale (read-number "Scale factor: " picp-scale))
+    (picp-alter-scale -10))
   (picp-update-buffer))
 
 (defun picp-no-scale ()
+  "Reset the scaling to 100%."
   (interactive)
-  (setq picp-scale 1.0)
-  (message "No scaling factor")
+  (setq picp-scale 100)
+  (message "No scaling.")
   (picp-update-buffer))
 
 (defun picp-fit-to-width-and-height ()
+  "Fit the picture to both width and height of window.
+Fitting is done before applying the scaling factor.  That is, it
+will fit only when the scaling is the default 100%.  The scaling
+can be restored to 100% by typing \\[picp-no-scale] \(for
+`picp-no-scale')."
   (interactive)
   (setq picp-fit :width-and-height)
   (message "Fit picture to both width and height")
   (picp-update-buffer))
 
 (defun picp-fit-to-width ()
+  "Fit the picture to the width of window.
+Fitting is done before applying the scaling factor.  That is, it
+will fit only when the scaling is the default 100%.  The scaling
+can be restored to 100% by typing \\[picp-no-scale] \(for
+`picp-no-scale')."
   (interactive)
   (setq picp-fit :width)
   (message "Fit picture to width")
   (picp-update-buffer))
 
 (defun picp-fit-to-height ()
+  "Fit the picture to the height of window.
+Fitting is done before applying the scaling factor.  That is, it
+will fit only when the scaling is the default 100%.  The scaling
+can be restored to 100% by typing \\[picp-no-scale] \(for
+`picp-no-scale')."
   (interactive)
   (setq picp-fit :height)
   (message "Fit picture to height")
   (picp-update-buffer))
 
 (defun picp-no-fit ()
+  "Do not fit the picture to the window."
   (interactive)
   (setq picp-fit nil)
   (message "Do not fit picture to window size")
@@ -1409,7 +1430,10 @@ be called."
 
 (defun picp-insert-file-list (list)
   (dolist (entry list)
-    (insert "  " (car entry) (picp-format-tags (cadr entry)) "\n")))
+    (insert "  "
+            (picp-separate (list (car entry)
+                                 (picp-format-tags (cadr entry))))
+            "\n")))
 
 (define-derived-mode picp-db-mode special-mode "picpocket-db"
   (define-key picp-db-mode-map [?g] #'picp-db-update)
@@ -1835,6 +1859,8 @@ be called."
             picp-look-count 0))))
 
 (defun picp-do-update-buffer ()
+  (unless (equal (buffer-name) picp-buffer)
+    (error "This requires picpocket mode"))
   (if (null picp-current)
       (picp-no-images)
     (if (picp-ensure-matching-current-pic)
@@ -1859,7 +1885,7 @@ be called."
            until (eq pic (or current picp-current))))
 
 (defun picp-no-images ()
-  (if picp-dired-when-no-images
+  (if picp-dired-when-no-images-p
       (dired default-directory)
     (let (buffer-read-only)
       (erase-buffer)
@@ -1917,8 +1943,6 @@ be called."
 
 
 (defun picp-insert (pic)
-  (unless (eq (current-buffer) (get-buffer picp-buffer))
-    (error "Not in picpocket buffer"))
   (let (buffer-read-only)
     (erase-buffer)
     (when pic
@@ -1963,7 +1987,16 @@ be called."
       (_       (cons :width (picp-scale pic-width))))))
 
 (defun picp-scale (n)
-  (truncate (* picp-scale n)))
+  (/ (* picp-scale n) 100))
+
+(defun picp-alter-scale (delta)
+  (setq picp-scale
+        (max 10 (+ picp-scale delta)))
+  (message "Scaling factor is %s%%" picp-scale))
+
+(defun picp-scale-info ()
+  (unless (eq picp-scale 100)
+    (format "%s%%%%" picp-scale)))
 
 (defun picp-create-image (pic window-size)
   (let ((size-param (picp-size-param pic window-size)))
@@ -2475,7 +2508,7 @@ Third invocation will hide the help."
                                0)))
            (pic-height (/ (- window-height (* 2 line-height)) 2))
            (picp-fit 'width-and-height)
-           (picp-scale 1)
+           (picp-scale 100)
            buffer-read-only)
       (erase-buffer)
       (insert (format "About to overwrite this picture (%s):\n" (picp-file-kb new)))
@@ -2490,17 +2523,23 @@ Third invocation will hide the help."
 
 (defun picp-header-line ()
   (when picp-current
-    (concat (format "%s/%s " picp-index picp-length)
-            (picp-header-dir)
-            "/"
-            (propertize (picp-file) 'face 'highlight)
-            " "
-            (when picp-debug
-              picp-header-text)
-            (picp-pic-kb picp-current)
-            (picp-format-tags (picp-tags picp-current))
-            (when picp-filter
-              (format " filter: %s" picp-filter)))))
+    (picp-separate
+     (list (concat (format "%s/%s " picp-index picp-length)
+                   (picp-header-dir)
+                   "/"
+                   (propertize (picp-file) 'face 'highlight))
+           (when picp-debug
+             picp-header-text)
+           (picp-pic-kb picp-current)
+           (picp-scale-info)
+           (picp-format-tags (picp-tags picp-current))
+           (when picp-filter
+             (format "filter: %s" picp-filter))))))
+
+(defun picp-separate (list)
+  (mapconcat 'identity
+             (delete nil (delete "" list))
+             " "))
 
 (defun picp-header-dir ()
   (if picp-header-full-path
@@ -2540,11 +2579,10 @@ Third invocation will hide the help."
     ""))
 
 (defun picp-format-tags (tags)
-  (if tags
-      (cl-case picp-tags-style
-        (org (format " :%s:" (mapconcat #'symbol-name tags ":")))
-        (t (format " (%s)" (mapconcat #'symbol-name tags " "))))
-    ""))
+  (when tags
+    (cl-case picp-tags-style
+      (org (format ":%s:" (mapconcat #'symbol-name tags ":")))
+      (t (format "(%s)" (mapconcat #'symbol-name tags " "))))))
 
 
 ;;; Misc help functions
