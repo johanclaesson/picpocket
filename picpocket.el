@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2015-04-18 14:05:51 jcl>
-;; Version: 10
+;; Time-stamp: <2015-04-26 17:27:09 jcl>
+;; Version: 11
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -186,10 +186,6 @@
 ;; * Look-ahead should also read the sizes of all files.
 ;; * Multiple simultaneous picpocket buffers.
 ;;   Universal arg to picpocket command will stop it from killing old buffer.
-;; * Some values of LC_COLLATE and LANG makes ls sorting case
-;;   insensitive.  directory-files always sorts by as cii.  Could do a
-;;   one-time test by calling ls in a tmp directory with files A and
-;;   b.
 ;; * Cache mystery with black full-screen frame.
 ;; ** Test with all black frames.
 ;; ** C debug.
@@ -257,13 +253,16 @@ to do this is to define it with `defcustom' like this:
 (defvar picp-dst-dir "~/")
 (defvar picp-dst-dir-is-cwd t)
 (defvar picp-recursive nil)
+(defvar picp-follow-symlinks t
+  "If non-nil follow symlinks while traversing directories recursively.
+Symlinks that points to picture files are always followed.
+This option concerns only symlinks that points to directories.")
 (defvar picp-last-action nil)
 (defvar picp-last-arg nil)
 (defvar picp-last-arg-is-dir nil)
 
 (defvar picp-header-line-format '(:eval (picp-header-line)))
 (defvar picp-header-full-path nil)
-(defvar picp-dired-when-no-images-p nil)
 (defvar picp-look-ahead-max 5)
 (defvar picp-ask-before-delete t)
 
@@ -427,11 +426,13 @@ hang.")
                            " [h - header]"
                            " [d - destination]"
                            " [r - recursive]"
+                           " [l - follow symlinks]"
                            " [D - debug]"))))
   (define-key toggle-map [?f] #'picp-toggle-fullscreen-frame)
   (define-key toggle-map [?d] #'picp-toggle-dst-dir-is-cwd)
   (define-key toggle-map [?h] #'picp-toggle-header)
   (define-key toggle-map [?r] #'picp-toggle-recursive)
+  (define-key toggle-map [?l] #'picp-toggle-follow-symlinks)
   (define-key toggle-map [?D] #'picp-toggle-debug)
 
   (suppress-keymap map)
@@ -506,7 +507,7 @@ hang.")
 (defun picpocket-dir (dir &optional selected-file)
   (setq picp-entry-function 'picpocket-dir
         picp-entry-args (list dir))
-  (let ((files (picp-file-list dir picp-recursive)))
+  (let ((files (picp-file-list dir)))
     (picp-create-buffer files selected-file dir)))
 
 (defun picpocket-files (files &optional selected-file)
@@ -651,13 +652,27 @@ can be restored to 100% by typing \\[picp-no-scale] \(for
   (message "Picpocket debug is %s." (if picp-debug "on" "off")))
 
 (defun picp-toggle-recursive ()
-  "Toggle recursive inclusion of sub-directories."
+  "Toggle recursive inclusion of sub-directories.
+Directories whose name starts with a dot will not be traversed.
+However picture files whose name starts with dot will be
+included."
   (interactive)
   (setq picp-recursive (not picp-recursive))
   (picp-revert)
   (message (if picp-recursive
                "Recursively include images in subdirectories."
              "Only show images in current directory.")))
+
+(defun picp-toggle-follow-symlinks ()
+  "Toggle whether to follow symlinks while recursively traversing directories.
+Symlinks that points to picture files are always followed.
+This command concerns only symlinks that points to directories."
+  (interactive)
+  (setq picp-follow-symlinks (not picp-follow-symlinks))
+  (picp-revert)
+  (message (if picp-follow-symlinks
+               "Follow symlinks."
+             "Do not follow symlinks.")))
 
 (defun picp-dired-up-directory ()
   "Enter Dired mode in the parent directory."
@@ -1431,8 +1446,8 @@ be called."
 (defun picp-insert-file-list (list)
   (dolist (entry list)
     (insert "  "
-            (picp-separate (list (car entry)
-                                 (picp-format-tags (cadr entry))))
+            (picp-separate (car entry)
+                           (picp-format-tags (cadr entry)))
             "\n")))
 
 (define-derived-mode picp-db-mode special-mode "picpocket-db"
@@ -1885,27 +1900,24 @@ be called."
            until (eq pic (or current picp-current))))
 
 (defun picp-no-images ()
-  (if picp-dired-when-no-images-p
-      (dired default-directory)
-    (let (buffer-read-only)
-      (erase-buffer)
-      (insert (propertize (format "\n\nNo images in list%s.\n\n"
-                                  (if picp-filter
-                                      (format " matching filter %s" picp-filter)
-                                    ""))
-                                  'face 'bold)
-              (format "Hit %s for dired in %s.\n"
-                      (picp-where-is 'picp-dired)
-                      (abbreviate-file-name default-directory))
-              (format "Hit %s to rebuild list%s.\n"
-                      (picp-where-is 'picp-revert)
-                      (picp-file-count-estimate)))
-      (when (eq picp-entry-function 'picpocket-dir)
-        (insert (format "Hit %s to %s.\n"
-                        (picp-where-is 'picp-toggle-recursive)
-                        (if picp-recursive
-                            "only look for images in current directory."
-                          "recursively include images in subdirectories.")))))))
+  (let (buffer-read-only)
+    (erase-buffer)
+    (insert (propertize (format "\n\nNo images in list%s.\n\n"
+                                (if picp-filter
+                                    (format " matching filter %s" picp-filter)
+                                  ""))
+                        'face 'bold))
+    (when picp-filter
+      (insert (format "Type %s to edit filter.\n"
+                      (picp-where-is 'picp-filter))))
+    (and (eq picp-entry-function 'picpocket-dir)
+         (not picp-recursive)
+         (insert
+          (format "Type %s to recursively include images in subdirectories.\n"
+                  (picp-where-is 'picp-toggle-recursive))))
+    (insert (format "Type %s for dired in %s.\n"
+                    (picp-where-is 'picp-dired)
+                    (abbreviate-file-name default-directory)))))
 
 (defun picp-where-is (command)
   (let ((binding (where-is-internal command overriding-local-map t)))
@@ -2021,63 +2033,8 @@ be called."
 (defun picp-image-regexp ()
   (or picp-image-regexp
       (setq picp-image-regexp (car (rassq 'imagemagick
-                                          image-type-file-name-regexps)))))
+                    image-type-file-name-regexps)))))
 
-
-;;; File count estimate functions
-
-(defun picp-file-count-estimate ()
-  (cl-case picp-entry-function
-    (picpocket-dir (picp-file-count-estimate-dir))
-    (picpocket-files (picp-file-count-estimate-list))
-    (t "")))
-
-(defun picp-file-count-estimate-dir ()
-  (let* ((dir (car picp-entry-args))
-         (count (if picp-recursive
-                    (picp-file-count-with-timeout dir 1)
-                  (picp-nr-of-images-in-dir dir))))
-    (if (and (listp count)
-             (eq 'interrupted (car count)))
-        (picp-format-estimate (cdr count) "before timeout")
-      (picp-format-estimate count))))
-
-
-(defun picp-file-count-with-timeout (dir timeout)
-  (let* ((deadline (time-add (current-time) (seconds-to-time timeout)))
-         (count (list 0)))
-    (catch 'timeout
-      (save-match-data
-        (picp-file-count-with-deadline dir count deadline)
-        (car count)))))
-
-(defun picp-file-count-with-deadline (dir count deadline)
-  (if (time-less-p deadline (current-time))
-      (throw 'timeout (cons 'interrupted (car count)))
-    (cl-incf (car count) (picp-nr-of-images-in-dir dir))
-    (cl-loop for file in (directory-files dir t)
-             do (when (and (file-directory-p file)
-                           (not (string-match "/\\.?\\.$" file)))
-                  (picp-file-count-with-deadline file count deadline)))))
-
-(defun picp-nr-of-images-in-dir (dir)
-  (cl-loop for file in (directory-files dir)
-           when (and (not (file-directory-p file))
-                     (string-match (picp-image-regexp) file))
-           count 1))
-
-(defun picp-file-count-estimate-list ()
-  (picp-format-estimate
-   (cl-loop for file in (car picp-entry-args)
-            when (and (string-match (picp-image-regexp) file)
-                      (file-exists-p file))
-            count 1)))
-
-(defun picp-format-estimate (count &optional suffix)
-  (format " (%s image file%s found%s)"
-          count
-          (picp-plural-s count)
-          (or suffix "")))
 
 
 ;;; English functions
@@ -2109,9 +2066,10 @@ be called."
           (t (picp-lookup-key-strict key)))))
 
 (defun picp-read-key-to-add-or-remove-tag (&optional remove all)
-  (let* ((prompt (format "Type a keystroke to select tag to %s %s(type ? for help): "
-                         (if remove "remove" "add")
-                         (if all "to all pictures " "")))
+  (let* ((prompt
+          (format "Type a keystroke to select tag to %s %s(type ? for help): "
+                  (if remove "remove" "add")
+                  (if all "to all pictures " "")))
          (key (read-key-sequence-vector prompt)))
     (cond ((equal key [7])
            (keyboard-quit))
@@ -2524,21 +2482,24 @@ Third invocation will hide the help."
 (defun picp-header-line ()
   (when picp-current
     (picp-separate
-     (list (concat (format "%s/%s " picp-index picp-length)
-                   (picp-header-dir)
-                   "/"
-                   (propertize (picp-file) 'face 'highlight))
-           (when picp-debug
-             picp-header-text)
-           (picp-pic-kb picp-current)
-           (picp-scale-info)
-           (picp-format-tags (picp-tags picp-current))
-           (when picp-filter
-             (format "filter: %s" picp-filter))))))
+     (concat (format "%s/%s " picp-index picp-length)
+             (picp-escape-percent (picp-header-dir))
+             "/"
+             (propertize (picp-escape-percent (picp-file)) 'face 'highlight))
+     (when picp-debug
+       picp-header-text)
+     (picp-pic-kb picp-current)
+     (picp-scale-info)
+     (picp-format-tags (picp-tags picp-current))
+     (when picp-filter
+       (format "filter:%s" picp-filter)))))
 
-(defun picp-separate (list)
+(defun picp-escape-percent (string)
+  (replace-regexp-in-string "%" "%%" string))
+
+(defun picp-separate (&rest strings)
   (mapconcat 'identity
-             (delete nil (delete "" list))
+             (delete nil (delete "" strings))
              " "))
 
 (defun picp-header-dir ()
@@ -2587,16 +2548,50 @@ Third invocation will hide the help."
 
 ;;; Misc help functions
 
-(defun picp-file-list (dir recursive)
-  (save-match-data
-    (cl-loop for file in (directory-files (file-truename dir) t)
-             append (if (file-directory-p file)
-                        (when recursive
-                          (unless (string-match "/\\.?\\.$" file)
-                            (picp-file-list file t)))
-                      (when (string-match (picp-image-regexp) file)
-                        (list file))))))
+(defvar picp-done-dirs)
+(defvar picp-file-count)
 
+(defun picp-file-list (dir)
+  (let ((picp-file-count 0)
+        (picp-done-dirs nil))
+    (prog1
+        (picp-file-list2 (directory-file-name (file-truename dir)))
+      (message "Found %s pictures" picp-file-count))))
+
+(defun picp-file-list2 (dir)
+  (push dir picp-done-dirs)
+  (condition-case err
+      (let ((files (directory-files dir t "[^.]"))
+            pic-files sub-files subdirs)
+        (dolist (file files)
+          (if (file-directory-p file)
+              (push file subdirs)
+            (when (string-match (picp-image-regexp) file)
+              (push file pic-files)
+              (when (zerop (% (cl-incf picp-file-count) 100))
+                (message "Found %s pictures so far %s"
+                         picp-file-count
+                         (if picp-recursive
+                             (format "(%s)" dir)
+                           ""))))))
+        (setq pic-files (nreverse pic-files))
+        (when picp-recursive
+          (dolist (subdir subdirs)
+            (when (or picp-follow-symlinks
+                      (not (file-symlink-p subdir)))
+              (let ((true-subdir (directory-file-name (file-truename subdir))))
+                (unless (or (picp-dot-file-p subdir)
+                            (member true-subdir picp-done-dirs))
+                  (setq sub-files (append (picp-file-list2 true-subdir)
+                                          sub-files)))))))
+        (append pic-files sub-files))
+    (file-error (progn
+                  (warn "Failed to access %s (%s)" dir err)
+                  nil))))
+
+(defun picp-dot-file-p (file)
+  "Return t if the FILE's name start with a dot."
+  (eq (elt (file-name-nondirectory file) 0) ?.))
 
 (defun picp-y-or-n-p (format &rest objects)
   (let* ((prompt (apply #'format format objects))

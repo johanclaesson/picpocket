@@ -1,10 +1,10 @@
-;; picpocket-test.el --- Some random code -*- lexical-binding: t -*-
+; picpocket-test.el --- Some random code -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2015-04-18 14:05:51 jcl>
-;; Version: 10
+;; Time-stamp: <2015-04-26 17:27:09 jcl>
+;; Version: 11
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -28,10 +28,12 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'time-date)
-(require 'picpocket)
+(require 'picpocket (concat default-directory "picpocket.el"))
 
 (defconst picp-test-files (list "blue.svg" "green.svg" "red.svg"))
-(defconst picp-test-tree-files (list "cold/blue.svg" "green.svg" "warm/red.svg"))
+(defconst picp-test-tree-files (list "green.svg"
+                                     "cold/blue.svg"
+                                     "warm/red.svg"))
 
 (defvar picp-test-dir nil)
 (defvar picp-delete-dir-after-test t)
@@ -65,16 +67,6 @@
                 "none")
               time-string)
      rc))
-
-;; (defmacro picp-with-test-dir (&rest body)
-;; (declare (debug ((symbolp form) body))
-;; (indent defun))
-;; `(picp-with-test-dir-macro ,(cons '(picp-ensure-only-test-files) body)))
-;;
-;; (defmacro picp-with-test-dir-lax (&rest body)
-;; (declare (debug ((symbolp form) body))
-;; (indent defun))
-;; `(picp-with-test-dir-macro ,body))
 
 (defmacro picp-with-test-dir (&rest body)
   "Run test in directory with blue.svg, green.svg and red.svg."
@@ -115,8 +107,9 @@ blue.svg, green.svg and red.svg."
 
 (defmacro picp-with-test-dir-tree (&rest body)
   "Run test in this tree:
-cold/blue.svg
+
 green.svg
+cold/blue.svg
 warm/red.svg"
   (declare (debug ((symbolp form) body))
            (indent defun))
@@ -130,8 +123,8 @@ warm/red.svg"
 (defmacro picp-with-test-buffer-tree (&rest body)
   "Run picpocket test starting at green.svg in this tree:
 
-cold/blue.svg
 green.svg
+cold/blue.svg
 warm/red.svg"
   (declare (debug ((symbolp form) body))
            (indent defun))
@@ -192,7 +185,8 @@ warm/red.svg"
 
 (defun picp-insert-svg (file)
   (insert "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">\n"
-          "  <rect width=\"150\" height=\"150\" fill=\"rgb(" (picp-svg-color file) ")\"\n"
+          "  <rect width=\"150\" height=\"150\" fill=\"rgb("
+          (picp-svg-color file) ")\"\n"
           "   stroke-width=\"1\" stroke=\"rgb(0, 0, 0)\"/>\n"
           "</svg>\n"))
 
@@ -244,19 +238,19 @@ warm/red.svg"
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
     (list (picp-time
-            (picp-previous)
+            (picp-next)
             (picp-add-tag "manga")
             (picp-rename "../warm"))
           (should (equal (picp-dir) (file-truename default-directory)))
-          (should (equal (picp-file) "green.svg"))
-          (should (file-exists-p "./warm/blue.svg")))))
+          (should (equal (picp-file) "red.svg"))
+          (should (file-exists-p "../warm/blue.svg")))))
 
 
 (ert-deftest picp-tree-copy-within-tree ()
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
     (list (picp-time
-            (picp-previous)
+            (picp-next)
             (picp-add-tag "manga")
             (picp-action 'copy "../warm"))
           (should (equal 3 picp-length))
@@ -272,7 +266,7 @@ warm/red.svg"
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
     (picp-time
-      (picp-previous)
+      (picp-next)
       (picp-add-tag "manga")
       (let* ((outside (file-name-as-directory (make-temp-file "picp-test-" t)))
              (outside-blue (concat outside "blue.svg")))
@@ -298,7 +292,7 @@ warm/red.svg"
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
     (list (picp-add-tag "manga")
-          (picp-create-picp-list (picp-file-list "." t)
+          (picp-create-picp-list (picp-file-list ".")
                                  (file-truename "green.svg"))
           (should (equal (picp-tags)
                          '(manga))))))
@@ -311,7 +305,7 @@ warm/red.svg"
           (picp-next)
           (picp-add-tag "horror")
           (picp-time
-            (picp-create-picp-list (picp-file-list ".." t)
+            (picp-create-picp-list (picp-file-list "..")
                                    (file-truename "../green.svg")))
           (should (equal (picp-tags)
                          '(manga)))
@@ -321,8 +315,28 @@ warm/red.svg"
 (ert-deftest picp-tree-file-list ()
   :tags '(:picpocket)
   (picp-with-test-dir-tree
-    (should (equal (picp-time (picp-file-list default-directory t))
+    (should (equal (picp-time (picp-file-list default-directory))
                    (mapcar #'file-truename picp-test-tree-files)))))
+
+(ert-deftest picp-file-list-symlink-loop ()
+  :tags '(:picpocket)
+  (picp-with-test-dir-tree
+    (unwind-protect (progn
+                      (make-symbolic-link "." "self")
+                      (make-symbolic-link "../warm" "cold/w")
+                      (make-symbolic-link "../cold" "warm/c")
+                      (should (eq 3 (length (picp-file-list picp-test-dir)))))
+      (delete-directory picp-test-dir t)
+      (make-directory picp-test-dir))))
+
+(ert-deftest picp-file-list-dot-file ()
+  :tags '(:picpocket)
+  (picp-with-test-dir-tree
+    (unwind-protect (progn
+                      (make-directory ".dot")
+                      (copy-file "green.svg" ".dot")
+                      (should (eq 3 (length (picp-file-list picp-test-dir)))))
+      (delete-directory (concat picp-test-dir ".dot") t))))
 
 
 (ert-deftest picp-files-test ()
@@ -341,9 +355,9 @@ warm/red.svg"
     (picp-with-test-buffer-tree
       (list (should (equal picp-test-tree-files
                            (picp-files)))
-            (should (eq (cdr picp-list) picp-current))
+            (should (eq picp-list picp-current))
             (should (equal 3 picp-length))
-            (should (equal 2 picp-index))))))
+            (should (equal 1 picp-index))))))
 
 
 (ert-deftest picp-add-tag-delete-file ()
@@ -407,28 +421,6 @@ warm/red.svg"
           (picp-hard-link-all "warm")
           (should (eq 3 (length picp-list)))
           (should (eq (+ 2 3) (length (directory-files "warm")))))))
-
-
-
-(ert-deftest picp-file-count ()
-  :tags '(:picpocket)
-  (list (picp-with-test-dir
-          (list (should (eq 3 (picp-file-count-with-timeout default-directory
-                                                            10)))
-                (should (equal (cons 'interrupted 0)
-                               (picp-file-count-with-timeout default-directory
-                                                             0)))))
-        (picp-with-test-dir-tree
-          (list (should (eq 3 (picp-file-count-with-timeout default-directory
-                                                            10)))
-                (should (equal (cons 'interrupted 0)
-                               (picp-file-count-with-timeout default-directory
-                                                             0)))))))
-
-(ert-deftest picp-file-count-estimate ()
-  :tags '(:picpocket)
-  (picp-with-test-buffer-tree
-    (should (equal (picp-file-count-estimate) " (3 image files found)"))))
 
 
 (defun picp-db-put-test-data ()
