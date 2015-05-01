@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2015-04-26 17:27:09 jcl>
-;; Version: 11
+;; Time-stamp: <2015-05-01 17:28:31 jcl>
+;; Version: 12
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -26,6 +26,7 @@
 ;; with ImageMagick.  It has commands for:
 ;;
 ;; * File operations on the image files (delete, move, copy, hardlink).
+;; * Scale and rotate the picture.
 ;; * Associate images with tags which are saved to disk.
 ;; * Customizing keystrokes for tagging and file operations.
 ;; * A simple slide show mode.
@@ -378,16 +379,15 @@ hang.")
   `(cadr (picp-measure-time ,@forms)))
 
 (defmacro picp-measure-time (&rest forms)
-  "Evaluate FORMS and return (rc time-string)."
+  "Evaluate FORMS and return (rc time).
+The reason it does not return (rc . time) is to be able to bind
+with `cl-multiple-value-bind' etc."
   (declare (indent defun))
-  (let ((begin-time (make-symbol "begin-time"))
+  (let ((before (make-symbol "before"))
         (rc (make-symbol "rc")))
-    `(let ((,begin-time (current-time))
+    `(let ((,before (current-time))
            (,rc (progn ,@forms)))
-       (with-decoded-time-value
-           ((sec-hi sec-low micro (time-subtract (current-time) ,begin-time)))
-         (list ,rc (format "%d.%03d_%03ds"
-                           (+ (lsh sec-hi 16) sec-low) (/ micro 1000) (% micro 1000)))))))
+       (list ,rc (time-since ,before)))))
 
 
 ;;; Picp mode
@@ -726,7 +726,8 @@ to a variable symbol.  The purpose of this command is to be
 able to quickly move to the definition and edit keystrokes."
   (interactive)
   (unless picp-keystroke-alist
-    (user-error "You need to set picp-keystroke-alist for this command to work"))
+    (user-error
+     "You need to set picp-keystroke-alist for this command to work"))
   (find-variable-other-window picp-keystroke-alist)
   (goto-char (point-at-eol)))
 
@@ -765,7 +766,8 @@ this frame and go back to the old frame."
                                       ;; (minibuffer . nil)
                                       ;; (cursor-type . nil)
                                       (fullscreen . fullboth)
-                                      ;; PENDING - background-color messing up the cache? YES
+                                      ;; PENDING - background-color messing up
+                                      ;; the cache? YES
                                       ;; See image.c:search_image_cache.
                                       ;; (foreground-color . "white")
                                       ;; (background-color
@@ -802,7 +804,7 @@ this frame and go back to the old frame."
 
 (defun picp-next-pic ()
   (cl-loop for pic = (cdr picp-current) then (cdr pic)
-           unless pic return nil
+           while pic
            when (picp-filter-match-p pic) return pic))
 
 (defun picp-previous ()
@@ -814,7 +816,7 @@ this frame and go back to the old frame."
 
 (defun picp-previous-pic ()
   (cl-loop for pic = (picp-safe-prev picp-current) then (picp-safe-prev pic)
-           unless pic return nil
+           while pic
            when (picp-filter-match-p pic) return pic))
 
 (defun picp-safe-prev (pic)
@@ -952,7 +954,8 @@ With prefix arg (ALL) hard link all pictures in the current list."
   (if all
       (picp-hard-link-all (read-directory-name "Hard link all pictures to: "
                                                (picp-dst-dir)))
-    (picp-action 'hard-link (read-directory-name "Hard link to: " (picp-dst-dir)))))
+    (picp-action 'hard-link (read-directory-name "Hard link to: "
+                                                 (picp-dst-dir)))))
 
 (defun picp-hard-link-all (dst)
   (picp-mapc (lambda (pic)
@@ -1023,7 +1026,9 @@ instead."
   (if all
       (picp-tag-to-all
        (read-string "Type tag to add to all files (-tag to remove): "))
-    (let* ((old-tags-string (mapconcat #'symbol-name (picp-tags picp-current) " "))
+    (let* ((old-tags-string (mapconcat #'symbol-name
+                                       (picp-tags picp-current)
+                                       " "))
            (new-tags-string (read-string "Tags: " old-tags-string))
            (new-tag-symbols (mapcar #'intern (split-string new-tags-string))))
       (picp-tags-set picp-current new-tag-symbols)
@@ -1032,19 +1037,6 @@ instead."
                (if new-tag-symbols
                    new-tag-symbols
                  "cleared")))))
-
-;; (defun picp-tag-all-by-string ()
-;; "Add a tag to all pictures in the current list.
-;; Type a minus before the tag to remove instead of add."
-;; (interactive)
-;; (picp-tag-to-all (read-string "Type tag to add to all files (-tag to remove): ")))
-
-;; (defun picp-tag-all-by-keystroke ()
-;; "Add a tag to all pictures in the current list.
-;; The tag is determined by a keystroke that is looked up in the
-;; variable `picp-keystroke-alist'."
-;; (interactive)
-;; (picp-tag-to-all (picp-read-key-to-add-or-remove-tag nil t)))
 
 
 (defun picp-set-filter (filter-string)
@@ -1337,13 +1329,14 @@ through the entire database."
 
     (setq picp-db-mode-map (make-sparse-keymap))
 
-    ;; exif -c -o z_e26e7184.jpg --ifd=EXIF -t0x9286 --set-value=foo z_e26e7184.jpg
+    ;; exif -c -o x.jpg --ifd=EXIF -t0x9286 --set-value=foo x.jpg
     (if (null sha-changed)
         (picp-bold "No files with changed sha1 checksum found.\n\n")
       (let ((n (length sha-changed)))
         (picp-db-update-command [?s]
           (lambda ()
-            (picp-bold "The following %s file%s have changed %s sha1 checksum.\n"
+            (picp-bold (concat "The following %s file%s have"
+                               " changed %s sha1 checksum.\n")
                        n (picp-plural-s n) (picp-plural-its-their n))
             (insert "Type ")
             (picp-bold "s")
@@ -1360,9 +1353,11 @@ through the entire database."
       (let ((n (length redundant-file-missing)))
         (picp-db-update-command [?r]
           (lambda ()
-            (picp-bold "The following %s redundant file name%s were not found on disk.\n"
+            (picp-bold (concat "The following %s redundant file name%"
+                               " were not found on disk.\n")
                        n (picp-plural-s n))
-            (insert "Their database entries contains at least one other file that do exist.\n"
+            (insert "Their database entries contains at least one other"
+                    " file that do exist.\n"
                     "Type ")
             (picp-bold "r")
             (insert " to remove these file names from the picpocket database.\n"
@@ -1378,9 +1373,11 @@ through the entire database."
       (let ((n (length unique-file-missing)))
         (picp-db-update-command [?u]
           (lambda ()
-            (picp-bold "The following %s unique file name%s were not found on disk.\n"
+            (picp-bold (concat "The following %s unique file name%s"
+                               " were not found on disk.\n")
                        n (picp-plural-s n))
-            (insert "Their database entries do not contain any existing files.\n"
+            (insert "Their database entries do not contain any"
+                    " existing files.\n"
                     "Type ")
             (picp-bold "u")
             (insert " to remove these entries from the picpocket database.\n"
@@ -1388,7 +1385,8 @@ through the entire database."
             (picp-insert-file-list unique-file-missing))
           (lambda ()
             (picp-remove-file-names-in-db unique-file-missing)
-            (picp-bold "Removed %s missing unique file name%s and their entries from database."
+            (picp-bold (concat "Removed %s missing unique file name%s"
+                               " and their entries from database.")
                        n (picp-plural-s n))))))
 
     (goto-char (point-min))
@@ -1686,7 +1684,8 @@ be called."
 
 
 (defun picp-db-valid-formats-string ()
-  (format "should be %s" (mapconcat #'symbol-name picp-db-valid-formats " or ")))
+  (format "should be %s"
+          (mapconcat #'symbol-name picp-db-valid-formats " or ")))
 
 
 (defun picp-db-save-hash-table ()
@@ -1750,12 +1749,13 @@ be called."
       (picp-cancel-timers)
     (picp-cancel-timers)
     (add-hook 'kill-buffer-hook #'picp-cancel-timers nil t)
-    (setq picp-timers (cl-loop for (f s) in picp-idle-timer-work-functions
-                               collect (run-with-idle-timer (max picp-min-idle-secs
-                                                                 s)
-                                                            t
-                                                            #'picp-run-idle-timer
-                                                            f)))))
+    (setq picp-timers
+          (cl-loop for (f s) in picp-idle-timer-work-functions
+                   collect (run-with-idle-timer (max picp-min-idle-secs
+                                                     s)
+                                                t
+                                                #'picp-run-idle-timer
+                                                f)))))
 
 
 (defun picp-cancel-timers ()
@@ -1797,8 +1797,10 @@ be called."
                          (time-subtract (current-time) start))
         (put f
              'picp-resume-timer
-             (run-with-idle-timer (time-add (or (current-idle-time) (seconds-to-time 0))
-                                            (seconds-to-time picp-idle-timer-deadline))
+             (run-with-idle-timer (time-add (or (current-idle-time)
+                                                (seconds-to-time 0))
+                                            (seconds-to-time
+                                             picp-idle-timer-deadline))
                                   nil
                                   #'picp-run-idle-timer
                                   f
@@ -1814,7 +1816,8 @@ be called."
 ;;
 ;; (with-current-buffer picp-buffer (picp-sha (last picp-list)))
 
-;; (setq picp-t (run-with-idle-timer 1 t #'picp-run-idle-timer #'picp-compute-sha))
+;; (setq picp-t (run-with-idle-timer 1 t #'picp-run-idle-timer
+;; #'picp-compute-sha))
 ;; (get 'picp-compute-sha 'picp-resume-timer)
 ;; (setq picp-idle-timer-deadline 0.1)
 ;; (picp-run-idle-timer #'picp-compute-sha)
@@ -1846,10 +1849,12 @@ be called."
                    (picp-look-ahead next))))
           (when (zerop picp-look-count)
             (setq picp-look-count 1
-                  picp-header-text (format "look-%s-[%s] " picp-look-count s))))))))
+                  picp-header-text (format "look-%s-[%s] "
+                                           picp-look-count s))))))))
 
 (defun picp-look-ahead-more (resume-function ignored)
-  (cl-destructuring-bind (n s) (picp-measure-time (picp-look-ahead-more2 resume-function))
+  (cl-destructuring-bind (n s)
+      (picp-measure-time (picp-look-ahead-more2 resume-function))
     (when (eq 1 picp-look-count)
       (setq picp-header-text (format "more-%s-[%s] " picp-look-count s)
             picp-look-count n))))
@@ -2114,7 +2119,8 @@ be called."
                     (picp-describe-keymap (vconcat prefix (vector key)) binding)
                   (unless (eq binding 'undefined)
                     (princ (format "%16s - %s\n"
-                                   (key-description (vconcat prefix (vector key)))
+                                   (key-description (vconcat prefix
+                                                             (vector key)))
                                    binding)))))
               map))
 
@@ -2393,26 +2399,31 @@ Third invocation will hide the help."
     (while (and (file-exists-p new-path)
                 (not identical))
       (cond ((equal old-path new-path)
-             (user-error "Attempt to %s file to itself" (picp-action-string action)))
+             (user-error "Attempt to %s file to itself"
+                         (picp-action-string action)))
             ((picp-files-identical-p old-path new-path)
              (setq ok-if-already-exists
-                   (y-or-n-p (format "Identical file already exists in %s.  Overwrite? "
-                                     new-dir))
+                   (y-or-n-p (concat "Identical file already exists in "
+                                     new-dir
+                                     "  Overwrite? "))
                    identical t))
             ((file-directory-p new-path)
-             (setq new-file (read-string
-                             (format "Directory %s already exists.  Rename this to: "
-                                     new-path)
-                             old-file)
-                   new-path (concat new-dir new-file)))
+             (setq new-file
+                   (read-string
+                    (format "Directory %s already exists.  Rename this to: "
+                            new-path)
+                    old-file))
+             (setq new-path (concat new-dir new-file)))
             (t
              (picp-compare pic new-path)
-             (setq new-file (read-string
-                             (format "File already exists (size %s).  Rename this (size %s) to: "
-                                     (picp-file-kb new-path)
-                                     (picp-file-kb old-path))
-                             old-file)
-                   new-path (concat new-dir new-file)))))
+             (setq new-file
+                   (read-string
+                    (format (concat "File already exists (size %s)."
+                                    "  Rename this (size %s) to: ")
+                            (picp-file-kb new-path)
+                            (picp-file-kb old-path))
+                    old-file))
+             (setq new-path (concat new-dir new-file)))))
     (cl-case action
       (move
        (picp--move old-path new-path ok-if-already-exists pic))
@@ -2469,7 +2480,8 @@ Third invocation will hide the help."
            (picp-scale 100)
            buffer-read-only)
       (erase-buffer)
-      (insert (format "About to overwrite this picture (%s):\n" (picp-file-kb new)))
+      (insert (format "About to overwrite this picture (%s):\n"
+                      (picp-file-kb new)))
       (insert-image (picp-create-image (picp-make-pic new)
                                        (cons window-width pic-height)))
       (insert (format "\nWith this picture (%s):\n" (picp-pic-kb pic)))
