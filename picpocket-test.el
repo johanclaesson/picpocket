@@ -1,10 +1,10 @@
-; picpocket-test.el --- Some random code -*- lexical-binding: t -*-
+;;; picpocket-test.el -*- lexical-binding: t; coding: utf-8-unix -*-
 
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2015-05-01 17:28:31 jcl>
-;; Version: 12
+;; Time-stamp: <2015-05-31 22:31:23 jcl>
+;; Version: 13
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -28,13 +28,22 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'time-date)
-(require 'picpocket (concat default-directory "picpocket.el"))
+(require 'subr-x)
+
+(cl-eval-when (compile)
+  (require 'picpocket (concat default-directory "picpocket.el")))
+
+(cl-eval-when (eval load)
+  (require 'picpocket (concat (file-name-directory (or load-file-name
+                                                       (buffer-file-name)))
+                              "picpocket.el")))
+
+
 
 (defconst picp-test-files (list "blue.svg" "green.svg" "red.svg"))
 (defconst picp-test-tree-files (list "green.svg"
                                      "cold/blue.svg"
                                      "warm/red.svg"))
-
 (defvar picp-test-dir nil)
 (defvar picp-delete-dir-after-test t)
 (put 'picp-test-dir 'risky-local-variable t)
@@ -53,20 +62,12 @@
                    collect dir)
           (list "manga-dir/")))
 
+(defvar picp-clock-file "~/share/elisp/picpocket-clock.txt")
+(defvar picp-clock-alist nil)
+
+
 
 ;;; Macros
-
-(defmacro picp-time (&rest body)
-  (declare (debug ((symbolp form) body))
-           (indent defun))
-  `(cl-destructuring-bind (rc time-string)
-       (picp-measure-time ,@body)
-     (message "Something in testcase %s took %s"
-              (if ert--running-tests
-                  (ert-test-name (car ert--running-tests))
-                "none")
-              time-string)
-     rc))
 
 (defmacro picp-with-test-dir (&rest body)
   "Run test in directory with blue.svg, green.svg and red.svg."
@@ -134,8 +135,127 @@ warm/red.svg"
            (progn ,@body)
          (kill-buffer picp-buffer)))))
 
+(defmacro picp-clock (&rest body)
+  (let ((thing (caar body)))
+    `(picp-clock-thing ',thing ,@body)))
 
-;;; Help functions.
+(defmacro picp-clock-thing (thing &rest body)
+  (let ((rc (make-symbol "rc"))
+        (s (make-symbol "s"))
+        (sum (make-symbol "sum")))
+  `(cl-destructuring-bind (,rc ,s) (picp-time (progn ,@body))
+     (let ((,sum (assq ,thing picp-clock-alist)))
+       (if ,sum
+           (setcdr ,sum (time-add ,s (cdr ,sum)))
+         (push (cons ,thing ,s) picp-clock-alist)))
+     ,rc)))
+
+(defmacro picp-with-clock (title &rest body)
+  (declare (debug ((symbolp form) body))
+           (indent defun))
+  `(let (picp-clock-alist)
+     (prog1
+         (progn ,@body)
+       (picp-clock-report ,title))))
+
+
+(defmacro picp-report-time (&rest body)
+  (declare (debug ((symbolp form) body))
+           (indent defun))
+  `(cl-destructuring-bind (rc time)
+       (picp-time ,@body)
+     (message "Something in testcase %s took %s"
+              (if ert--running-tests
+                  (ert-test-name (car ert--running-tests))
+                "none")
+              (picp-sec-string time))
+     rc))
+
+
+;;; Benchmark
+
+(defun picp-release-bench ()
+  (let ((picp-clock-file "~/share/elisp/picpocket-clock-release.txt"))
+    (picp-bench)))
+
+;; PENDING - picp-file-list bench
+(defun picp-bench ()
+  (let ((imagemagick-render-type 1))
+    (picp-with-clock "Default benchmark"
+      (picp-clock (picpocket-dir "~/bilder/japan/dvd/"))
+      (with-current-buffer picp-buffer
+        (dotimes (ignored 30)
+          (picp-clock (picp-look-ahead-next))
+          (picp-clock (redisplay))
+          (picp-clock (picp-next)))))))
+
+(defun picp-clock-report (title)
+  (message "picp-clock-report at %s" (current-time-string))
+  (cl-loop for (thing . s) in picp-clock-alist
+           do (message "%s %s" thing (picp-sec-string s)))
+  (when picp-clock-file
+    (with-current-buffer (let ((enable-local-variables :safe))
+                           (find-file-noselect picp-clock-file))
+      (goto-char (point-max))
+      (insert "\n"
+              (pp-to-string (picp-clock-info title))
+              (pp-to-string (cl-loop for (thing . s) in picp-clock-alist
+                                     collect (cons thing s))))
+      (save-buffer))))
+
+(defun picp-clock-info (title)
+  (list (cons 'title title)
+        (cons 'time-string (current-time-string))
+        (cons 'time (current-time))
+        (cons 'system-name (system-name))
+        (cons 'system-configuration system-configuration)
+        (cons 'cpu (picp-cpu))
+        (cons 'linux (string-trim (shell-command-to-string "lsb_release -ds")))
+        (cons 'emacs-version emacs-version)
+        (cons 'repo-version (emacs-repository-get-version))
+        (cons 'byte-compile (not (not (member ".elc" load-suffixes))))
+        (cons 'imagemagick-version (picp-imagemagick-version))
+        (cons 'render-type imagemagick-render-type)
+        (cons 'picp-version picp-version)))
+
+(defun picp-imagemagick-version ()
+  (string-trim (cadr (split-string (shell-command-to-string
+                                    "dpkg -s imagemagick | grep Version")
+                                   " "))))
+
+(defun picp-cpu ()
+  (cadr (split-string (shell-command-to-string "lscpu  | grep 'Model name'")
+                      ":" t "[\n\t ]+")))
+
+
+(let (picp-clock-alist)
+  (cl-flet ((picp-time (&rest _forms) (list 1 (seconds-to-time 1))))
+    (picp-clock-thing :plus (+ 1 1))
+    (picp-clock-thing :minus (- 1 1))
+    (picp-clock-thing :plus (+ 1 1))
+    picp-clock-alist))
+
+(let (picp-clock-alist)
+  (cl-flet ((picp-time (&rest _forms) (list 1 (seconds-to-time 1))))
+    (picp-clock (+ 1 1))
+    (picp-clock (- 1 1))
+    (picp-clock (+ 1 1))
+    picp-clock-alist))
+
+(defun picp-hide-stuff ()
+  (interactive)
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward "^((title" nil t)
+      (goto-char (point-at-eol))
+      (let ((start (point)))
+        (backward-up-list)
+        (forward-sexp)
+        (add-text-properties start (1- (point)) (list 'invisible t))))))
+
+
+
+;;; Help functions
 
 (defun picp-should-be-reset ()
   (list (should (eq picp-list nil))
@@ -221,7 +341,7 @@ warm/red.svg"
 (ert-deftest picp-tree-add-tag-to-all ()
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
-    (list (picp-time (picp-tag-to-all "manga"))
+    (list (picp-report-time (picp-tag-to-all "manga"))
           (should (equal (picp-tags) '(manga)))
           (should (equal (picp-tags (cdr picp-current)) '(manga)))
           (should (equal (picp-tags (cddr picp-current)) '(manga))))))
@@ -229,7 +349,7 @@ warm/red.svg"
 (ert-deftest picp-tag-to-all ()
   :tags '(:picpocket)
   (picp-with-test-buffer
-    (list (picp-time (picp-tag-to-all "manga"))
+    (list (picp-report-time (picp-tag-to-all "manga"))
           (should (equal (picp-tags) '(manga)))
           (should (equal (picp-tags (cdr picp-current)) '(manga)))
           (should (equal (picp-tags (cddr picp-current)) '(manga))))))
@@ -237,7 +357,7 @@ warm/red.svg"
 (ert-deftest picp-tree-move-within-tree ()
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
-    (list (picp-time
+    (list (picp-report-time
             (picp-next)
             (picp-add-tag "manga")
             (picp-rename "../warm"))
@@ -249,7 +369,7 @@ warm/red.svg"
 (ert-deftest picp-tree-copy-within-tree ()
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
-    (list (picp-time
+    (list (picp-report-time
             (picp-next)
             (picp-add-tag "manga")
             (picp-action 'copy "../warm"))
@@ -265,7 +385,7 @@ warm/red.svg"
 (ert-deftest picp-tree-move-outside-tree ()
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
-    (picp-time
+    (picp-report-time
       (picp-next)
       (picp-add-tag "manga")
       (let* ((outside (file-name-as-directory (make-temp-file "picp-test-" t)))
@@ -279,11 +399,11 @@ warm/red.svg"
 (ert-deftest picp-tree-add-and-clear-tag ()
   :tags '(:picpocket)
   (picp-with-test-buffer-tree
-    (list (picp-time
+    (list (picp-report-time
             (picp-next)
             (picp-add-tag "manga"))
           (should (equal (picp-tags) '(manga)))
-          (picp-time
+          (picp-report-time
             (picp-tags-delete-file picp-current (picp-path)))
           (should-not (picp-tags)))))
 
@@ -304,7 +424,7 @@ warm/red.svg"
     (list (picp-add-tag "manga")
           (picp-next)
           (picp-add-tag "horror")
-          (picp-time
+          (picp-report-time
             (picp-create-picp-list (picp-file-list "..")
                                    (file-truename "../green.svg")))
           (should (equal (picp-tags)
@@ -315,7 +435,7 @@ warm/red.svg"
 (ert-deftest picp-tree-file-list ()
   :tags '(:picpocket)
   (picp-with-test-dir-tree
-    (should (equal (picp-time (picp-file-list default-directory))
+    (should (equal (picp-report-time (picp-file-list default-directory))
                    (mapcar #'file-truename picp-test-tree-files)))))
 
 (ert-deftest picp-file-list-symlink-loop ()
@@ -341,7 +461,7 @@ warm/red.svg"
 
 (ert-deftest picp-files-test ()
   :tags '(:picpocket)
-  (picp-time
+  (picp-report-time
     (picp-with-test-buffer
       (list (should (equal picp-test-files
                            (picp-files)))
@@ -351,7 +471,7 @@ warm/red.svg"
 
 (ert-deftest picp-tree-files ()
   :tags '(:picpocket)
-  (picp-time
+  (picp-report-time
     (picp-with-test-buffer-tree
       (list (should (equal picp-test-tree-files
                            (picp-files)))
@@ -363,7 +483,7 @@ warm/red.svg"
 (ert-deftest picp-add-tag-delete-file ()
   :tags '(:picpocket)
   (picp-with-test-buffer
-    (list (picp-time
+    (list (picp-report-time
             (picp-add-tag "manga")
             (picp-delete)
             (picp-update-buffer))
@@ -414,11 +534,11 @@ warm/red.svg"
           (should (eq 3 (length picp-list)))
           (should (eq (+ 2 3) (length (directory-files "warm")))))))
 
-(ert-deftest picp-hard-link-all ()
+(ert-deftest picp-hardlink-all ()
   :tags '(:picpocket)
   (picp-with-test-buffer
     (list (picp-end)
-          (picp-hard-link-all "warm")
+          (picp-hardlink-all "warm")
           (should (eq 3 (length picp-list)))
           (should (eq (+ 2 3) (length (directory-files "warm")))))))
 
@@ -562,7 +682,8 @@ warm/red.svg"
   (picp-with-test-buffer
     (picp-add-tag "troll")
     (delete-file "blue.svg")
-    (let ((unique-file-missing (cdr (assq :unique-file-missing (picp-db-traverse)))))
+    (let ((unique-file-missing (cdr (assq :unique-file-missing
+                                          (picp-db-traverse)))))
       (should (eq 1 (length unique-file-missing)))
       (picp-remove-file-names-in-db unique-file-missing)
       (should (zerop (picp-db-count))))))
@@ -572,11 +693,13 @@ warm/red.svg"
   (picp-with-test-buffer
     (copy-file "blue.svg" "green.svg" t)
     (picp-add-tag "troll")
-    (picp-compute-sha #'ignore nil)
+    (cl-loop for pic on picp-list
+             do (picp-sha-via-cache pic))
     (picp-db-dump)
     (should (eq 1 (picp-db-count)))
     (delete-file "blue.svg")
-    (let ((redundant-file-missing (cdr (assq :redundant-file-missing (picp-db-traverse)))))
+    (let ((redundant-file-missing (cdr (assq :redundant-file-missing
+                                             (picp-db-traverse)))))
       (should (eq 1 (length redundant-file-missing)))
       (picp-remove-file-names-in-db redundant-file-missing))
     (should (eq 1 (picp-db-count)))))
