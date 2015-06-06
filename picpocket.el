@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2015-05-31 22:31:23 jcl>
-;; Version: 13
+;; Time-stamp: <2015-06-06 21:31:24 jcl>
+;; Version: 14
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -28,6 +28,7 @@
 ;; * File operations on the picture files (delete, move, copy, hardlink).
 ;; * Scale and rotate the picture.
 ;; * Associate pictures with tags which are saved to disk.
+;; * Filter pictures according to tags.
 ;; * Customizing keystrokes for tagging and file operations.
 ;; * A simple slide show mode.
 ;;
@@ -143,9 +144,12 @@
 ;;; Code:
 
 ;; TODO.
+;; * Use same default sort order as dired?
+;; * Why is look ahead slower in version 13 than in 12.x?
 ;; * Worthwhile to delay calculation of picp-bytes to idle timer?
 ;; * Remove all &optional before pic.
 ;; * defvar -> defcustom where appropriate.
+;; * Command to show all pictures in database with certain tags.
 ;; * Logical operators for filters
 ;;   filter: !bw manga
 ;;   ! means NOT, space means AND, comma means OR.
@@ -205,7 +209,12 @@
 ;; * Option: When a pic tagged with X is moved to a directory with sub-directory
 ;;   X the pic will move to that sub-directory.
 ;; * Insert picp-keystroke-alist template in .emacs if undefined.
-
+;; * Alternative to picp-adapt-to-window-size-change.
+;;   Save "drawing" closure in variable.  Normally this is
+;;   picp-update-buffer.  The only other currently valid value is
+;;   picp-compare.  This will make picp-compare also adapt to window
+;;   size changes.  Not worth the effort for only picp-compare but if
+;;   more different drawing functions appears then maybe.
 
 (eval-when-compile
   (require 'time-date)
@@ -249,6 +258,18 @@ to do this is to define it with `defcustom' like this:
  (setq picp-keystroke-alist 'my-picp-alist)
  (put 'my-picp-alist 'risky-local-variable t)")
 
+(defgroup picpocket nil "Picture viewer."
+  :group 'picpocket)
+(defcustom picp-fit :x-and-y
+  "Fit picture size to window when non-nil."
+  :type '(choice (const :tag "Fit to both width and height" :x-and-y)
+                 (const :tag "Fit to width" :x)
+                 (const :tag "Fit to height" :y)
+                 (const :tag "Show picture in it's natural size" nil)))
+(defcustom picp-scale 100
+  "Picture scaling in percent."
+  :type 'integer)
+
 (defvar picp-header-line-format '(:eval (picp-header-line)))
 (defvar picp-header-full-path nil)
 (defvar picp-look-ahead-max 5)
@@ -273,7 +294,7 @@ This option concerns only symlinks that points to directories.")
 
 ;;; Internal variables
 
-(defconst picp-version 13)
+(defconst picp-version 14)
 (defconst picp-buffer "*picpocket*")
 
 (defvar picp-frame nil)
@@ -285,6 +306,8 @@ This option concerns only symlinks that points to directories.")
 (defvar picp-sum 0)
 (defvar picp-picture-regexp nil)
 (defvar picp-last-look-ahead nil)
+(defvar picp-clock-alist nil)
+(defvar picp-adapt-to-window-size-change t)
 
 ;;
 ;; Buffer local variables.
@@ -398,6 +421,28 @@ with `cl-multiple-value-bind' etc."
            (,rc (progn ,@forms)))
        (list ,rc (time-since ,before)))))
 
+(defmacro picp-clock (&rest body)
+  (let ((thing (caar body)))
+    `(picp-clock-thing ',thing ,@body)))
+
+(defmacro picp-clock-thing (thing &rest body)
+  (let ((rc (make-symbol "rc"))
+        (s (make-symbol "s"))
+        (sum (make-symbol "sum")))
+  `(cl-destructuring-bind (,rc ,s) (picp-time (progn ,@body))
+     (let ((,sum (assq ,thing picp-clock-alist)))
+       (if ,sum
+           (setcdr ,sum (time-add ,s (cdr ,sum)))
+         (push (cons ,thing ,s) picp-clock-alist)))
+     ,rc)))
+
+(defmacro picp-with-clock (title &rest body)
+  (declare (debug ((symbolp form) body))
+           (indent defun))
+  `(let (picp-clock-alist)
+     (prog1
+         (progn ,@body)
+       (picp-clock-report ,title))))
 
 ;;; Picp mode
 
@@ -417,7 +462,8 @@ with `cl-multiple-value-bind' etc."
         auto-hscroll-mode nil
         vertical-scroll-bar nil
         left-fringe-width 0
-        right-fringe-width 0)  ;; Call set-window-buffer to update the fringes.
+        right-fringe-width 0)
+  ;; Call set-window-buffer to update the fringes.
   (set-window-buffer (selected-window) (current-buffer))
   (setq header-line-format (when picp-header
                              picp-header-line-format))
@@ -573,9 +619,6 @@ that."
     (picp-set-rotation picp-current degrees)
     (picp-update-buffer)))
 
-
-(defvar picp-fit :x-and-y)
-(defvar picp-scale 100)
 
 (defun picp-scale-in (arg)
   "Zoom in 10%.
@@ -1801,9 +1844,8 @@ be called."
 
 
 (defun picp-init-timers ()
-  (if picp-inhibit-timers
-      (picp-cancel-timers)
-    (picp-cancel-timers)
+  (picp-cancel-timers)
+  (unless picp-inhibit-timers
     (add-hook 'kill-buffer-hook #'picp-cancel-timers nil t)
     (setq picp-timers
           (cl-loop for (f s) in picp-idle-timer-work-functions
@@ -1831,10 +1873,12 @@ be called."
         (buffer (get-buffer picp-buffer)))
     (when (timerp resume-timer)
       (cancel-timer resume-timer))
-    (if buffer
-        (with-current-buffer buffer
-          (picp-run-idle-timer-in-buffer f state))
-      (picp-cancel-timers))))
+    (cond (picp-inhibit-timers
+           (picp-cancel-timers))
+          (buffer
+           (with-current-buffer buffer
+             (picp-run-idle-timer-in-buffer f state)))
+          (t (picp-cancel-timers)))))
 
 (defun picp-run-idle-timer-in-buffer (f state)
   (cond ((null picp-list)
@@ -2011,13 +2055,13 @@ necessarily run with the picpocket window selected."
     (setq picp-window-size (cons (- x1 x0 (frame-char-width))
                                  (- y1 y0)))))
 
-
 (defun picp-create-image (pic canvas-size)
-  (pcase-let ((`(,keyword . ,value) (picp-size-param pic canvas-size)))
+  (pcase-let ((`(,keyword . ,value) (picp-clock
+                                     (picp-size-param pic canvas-size))))
     (create-image (picp-path pic)
                   'imagemagick nil
                   :rotation (picp-rotation pic)
-                  keyword value)))
+                  keyword (picp-scale value))))
 
 (defun picp-size-param (pic canvas-size)
   (pcase-let ((canvas-ratio (picp-cons-ratio canvas-size))
@@ -2474,15 +2518,18 @@ Third invocation will hide the help."
                     old-file))
              (setq new-path (concat new-dir new-file)))
             (t
-             (picp-compare pic new-path)
-             (setq new-file
-                   (read-string
-                    (format (concat "File already exists (size %s)."
-                                    "  Rename this (size %s) to: ")
-                            (picp-file-kb new-path)
-                            (picp-file-kb old-path))
-                    old-file))
-             (setq new-path (concat new-dir new-file)))))
+             (unwind-protect
+                 (let (picp-adapt-to-window-size-change)
+                   (picp-compare pic new-path)
+                   (setq new-file
+                         (read-string
+                          (format (concat "File already exists (size %s)."
+                                          "  Rename this (size %s) to: ")
+                                  (picp-file-kb new-path)
+                                  (picp-file-kb old-path))
+                          old-file))
+                   (setq new-path (concat new-dir new-file)))
+               (picp-update-buffer)))))
     (cl-case action
       (move
        (picp--move old-path new-path ok-if-already-exists pic))
@@ -2528,6 +2575,7 @@ Third invocation will hide the help."
            old
            dst))
 
+
 (defun picp-compare (pic new)
   (cl-destructuring-bind (window-width . window-height) (picp-save-window-size)
     (let* ((line-height (+ (frame-char-height)
@@ -2535,8 +2583,8 @@ Third invocation will hide the help."
                                (frame-parameter nil 'line-spacing)
                                0)))
            (pic-height (/ (- window-height (* 2 line-height)) 2))
-           (picp-fit 'width-and-height)
-           (picp-scale 100)
+           (picp-fit (picp-standard-value 'picp-fit))
+           (picp-scale (picp-standard-value 'picp-scale))
            buffer-read-only)
       (erase-buffer)
       (insert (format "About to overwrite this picture (%s):\n"
@@ -2546,6 +2594,10 @@ Third invocation will hide the help."
       (insert (format "\nWith this picture (%s):\n" (picp-pic-kb pic)))
       (insert-image (picp-create-image pic (cons window-width pic-height)))
       (goto-char (point-min)))))
+
+(defun picp-standard-value (symbol)
+  (eval (car (get symbol 'standard-value))))
+
 
 
 ;;; Header line functions
@@ -2740,11 +2792,13 @@ Third invocation will hide the help."
 
 
 (defun picp-window-size-change-function (frame)
-  (dolist (window (window-list frame 'no-minibuffer))
-    (when (eq (get-buffer picp-buffer) (window-buffer window))
-      (with-selected-window window
-        (with-current-buffer picp-buffer
-          (picp-update-buffer))))))
+  (when picp-adapt-to-window-size-change
+    (dolist (window (window-list frame 'no-minibuffer))
+      (when (eq (get-buffer picp-buffer) (window-buffer window))
+        (with-selected-window window
+          (with-current-buffer picp-buffer
+            (unless (equal picp-window-size (picp-save-window-size))
+              (picp-update-buffer))))))))
 
 
 (defun picp-files-identical-p (a b)

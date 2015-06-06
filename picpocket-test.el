@@ -3,8 +3,8 @@
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2015-05-31 22:31:23 jcl>
-;; Version: 13
+;; Time-stamp: <2015-06-06 21:31:24 jcl>
+;; Version: 14
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -63,7 +63,6 @@
           (list "manga-dir/")))
 
 (defvar picp-clock-file "~/share/elisp/picpocket-clock.txt")
-(defvar picp-clock-alist nil)
 
 
 
@@ -135,28 +134,7 @@ warm/red.svg"
            (progn ,@body)
          (kill-buffer picp-buffer)))))
 
-(defmacro picp-clock (&rest body)
-  (let ((thing (caar body)))
-    `(picp-clock-thing ',thing ,@body)))
 
-(defmacro picp-clock-thing (thing &rest body)
-  (let ((rc (make-symbol "rc"))
-        (s (make-symbol "s"))
-        (sum (make-symbol "sum")))
-  `(cl-destructuring-bind (,rc ,s) (picp-time (progn ,@body))
-     (let ((,sum (assq ,thing picp-clock-alist)))
-       (if ,sum
-           (setcdr ,sum (time-add ,s (cdr ,sum)))
-         (push (cons ,thing ,s) picp-clock-alist)))
-     ,rc)))
-
-(defmacro picp-with-clock (title &rest body)
-  (declare (debug ((symbolp form) body))
-           (indent defun))
-  `(let (picp-clock-alist)
-     (prog1
-         (progn ,@body)
-       (picp-clock-report ,title))))
 
 
 (defmacro picp-report-time (&rest body)
