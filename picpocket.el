@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2015-06-06 21:31:24 jcl>
-;; Version: 14
+;; Time-stamp: <2015-07-02 12:41:44 jcl>
+;; Version: 15
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -294,7 +294,7 @@ This option concerns only symlinks that points to directories.")
 
 ;;; Internal variables
 
-(defconst picp-version 14)
+(defconst picp-version 15)
 (defconst picp-buffer "*picpocket*")
 
 (defvar picp-frame nil)
@@ -542,9 +542,8 @@ with `cl-multiple-value-bind' etc."
   (define-key map [right] #'scroll-left)
   (define-key map [(control ?b)] #'scroll-right)
   (define-key map [(control ?f)] #'scroll-left)
+  (define-key map [?j] #'picp-jump)
   (define-key map [??] #'picp-help)
-  ;; PENDING
-  ;; (define-key map [?j] #'picp-jump)
   (setq picp-mode-map map))
 
 ;;; Entry points.
@@ -892,9 +891,7 @@ This hook make sure it is fitted to `picp-frame'."
   (interactive)
   (let ((next (picp-next-pic)))
     (if next
-        (let ((inhibit-quit t))
-          (setq picp-current next
-                picp-index (picp-calculate-index)))
+        (picp-set-current next)
       (picp-no-file "next")))
   (picp-update-buffer))
 
@@ -903,11 +900,18 @@ This hook make sure it is fitted to `picp-frame'."
            while pic
            when (picp-filter-match-p pic) return pic))
 
+(defun picp-set-current (pic)
+  (let ((inhibit-quit t))
+    (setq picp-current pic
+          picp-index (picp-calculate-index))))
+
 (defun picp-previous ()
   "Move to the previous picture in the current list."
   (interactive)
-  (unless (picp-set-current (picp-previous-pic))
-    (picp-no-file "previous"))
+  (let ((prev (picp-previous-pic)))
+    (if prev
+        (picp-set-current prev)
+      (picp-no-file "previous")))
   (picp-update-buffer))
 
 (defun picp-previous-pic ()
@@ -918,13 +922,6 @@ This hook make sure it is fitted to `picp-frame'."
 (defun picp-safe-prev (pic)
   (when pic
     (picp-prev pic)))
-
-(defun picp-set-current (pic)
-  (when pic
-    (let ((inhibit-quit t))
-      (setq picp-current pic
-            picp-index (picp-calculate-index)))))
-
 
 (defun picp-home ()
   "Move to the first picture in the current list."
@@ -1122,9 +1119,7 @@ instead."
   (if all
       (picp-tag-to-all
        (read-string "Type tag to add to all files (-tag to remove): "))
-    (let* ((old-tags-string (mapconcat #'symbol-name
-                                       (picp-tags picp-current)
-                                       " "))
+    (let* ((old-tags-string (picp-tags-string-to-edit (picp-tags picp-current)))
            (new-tags-string (read-string "Tags: " old-tags-string))
            (new-tag-symbols (mapcar #'intern (split-string new-tags-string))))
       (picp-tags-set picp-current new-tag-symbols)
@@ -1134,6 +1129,9 @@ instead."
                    new-tag-symbols
                  "cleared")))))
 
+(defun picp-tags-string-to-edit (tags)
+  (when tags
+    (concat (mapconcat #'symbol-name tags " ") " ")))
 
 (defun picp-set-filter (filter-string)
   "Enter the current picpocket filter.
@@ -1161,6 +1159,54 @@ space-separated string."
   "Show only pictures having the tag in the current filter."
   (interactive)
   (picp-set-filter (picp-read-key "filtering tag")))
+
+
+(defun picp-jump ()
+  "Jump to picture specified by file-name or index number."
+  (interactive)
+  (let ((nr-or-file-name (completing-read "Jump to index or file-name: "
+                                          (picp-mapcar 'picp-file))))
+    (or (picp-jump-to-index nr-or-file-name)
+        (picp-jump-to-file nr-or-file-name))
+    (picp-update-buffer)))
+
+(defun picp-jump-to-index (string)
+  (when (string-match "^[0-9]+$" string)
+    (let ((pic (picp-pic-by-index (string-to-number string))))
+      (when pic
+        (picp-set-current pic)))))
+
+(defun picp-pic-by-index (n)
+  (and (< 0 n)
+       (<= n picp-length)
+       (cl-loop for pic on picp-list
+                repeat (1- n)
+                finally return pic)))
+
+(defun picp-jump-to-file (file)
+  (let ((pic-list (picp-pics-by-file file)))
+    (cond ((null pic-list)
+           (user-error "Picture not found (%s)" file))
+          ((eq 1 (length pic-list))
+           (picp-set-current (car pic-list)))
+          (t
+           (let ((prompt (format "%s is available in %s directories.  Select: "
+                                 file (length pic-list))))
+             (picp-set-current (picp-select-pic-by-dir pic-list prompt)))))))
+
+(defun picp-pics-by-file (file)
+  (cl-loop for pic on picp-list
+           when (equal (picp-file pic) file)
+           collect pic))
+
+(defun picp-select-pic-by-dir (pic-list prompt)
+  (let* ((dirs (cl-loop for pic in pic-list
+                        collect (picp-dir pic)))
+         (dir (completing-read prompt dirs nil t)))
+    (cl-loop for pic in pic-list
+             when (equal dir (picp-dir pic))
+             return pic)))
+
 
 ;;; Pic double-linked list functions.
 
@@ -2843,6 +2889,11 @@ Third invocation will hide the help."
   (cl-loop for pic on picp-list
            when (picp-filter-match-p pic)
            do (funcall f pic)))
+
+(defun picp-mapcar (f)
+  (cl-loop for pic on picp-list
+           when (picp-filter-match-p pic)
+           collect (funcall f pic)))
 
 (defun picp-debug (s format &rest args)
   (when picp-debug

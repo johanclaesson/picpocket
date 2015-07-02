@@ -3,8 +3,8 @@
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2015-06-06 21:31:24 jcl>
-;; Version: 14
+;; Time-stamp: <2015-07-02 12:41:44 jcl>
+;; Version: 15
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -157,6 +157,9 @@ warm/red.svg"
     (picp-bench)))
 
 ;; PENDING - picp-file-list bench
+;; PENDING - Write float seconds instead of time list
+;; PENDING - Make it possible to compare older versions
+;; Probably should put git tags on each version.
 (defun picp-bench ()
   (let ((imagemagick-render-type 1))
     (picp-with-clock "Default benchmark"
@@ -681,6 +684,27 @@ warm/red.svg"
       (should (eq 1 (length redundant-file-missing)))
       (picp-remove-file-names-in-db redundant-file-missing))
     (should (eq 1 (picp-db-count)))))
+
+
+(ert-deftest picp-test-pic-by-index ()
+  (picp-with-test-buffer
+    (should-not (picp-pic-by-index 0))
+    (should (equal "blue.svg" (picp-file (picp-pic-by-index 1))))
+    (should (equal "red.svg" (picp-file (picp-pic-by-index 3))))
+    (should-not (picp-pic-by-index 4))))
+
+(ert-deftest picp-test-jump ()
+  (picp-with-test-buffer-tree
+    (picp-jump-to-file "green.svg")
+    (should (equal 1 picp-index))
+    (picp-rename "red.svg")
+    (let ((reds (picp-pics-by-file "red.svg")))
+      (should (eq 2 (length reds)))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt coll &rest ignored) (cadr coll))))
+        (let ((pic (picp-select-pic-by-dir reds "Choose wisely: ")))
+          (should (eq 3 (picp-calculate-index pic))))))))
+
 
 
 (provide 'picpocket-test)
