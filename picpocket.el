@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2015-07-02 12:41:44 jcl>
-;; Version: 15
+;; Time-stamp: <2015-07-19 16:33:54 jcl>
+;; Version: 16
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -273,7 +273,7 @@ to do this is to define it with `defcustom' like this:
 (defvar picp-header-line-format '(:eval (picp-header-line)))
 (defvar picp-header-full-path nil)
 (defvar picp-look-ahead-max 5)
-(defvar picp-ask-before-delete t)
+(defvar picp-confirm-delete (not noninteractive))
 (defvar picp-tags-style 'list)
 (defvar picp-demote-warnings nil)
 (defvar picp-backdrop-command nil)
@@ -294,7 +294,7 @@ This option concerns only symlinks that points to directories.")
 
 ;;; Internal variables
 
-(defconst picp-version 15)
+(defconst picp-version 16)
 (defconst picp-buffer "*picpocket*")
 
 (defvar picp-frame nil)
@@ -308,23 +308,35 @@ This option concerns only symlinks that points to directories.")
 (defvar picp-last-look-ahead nil)
 (defvar picp-clock-alist nil)
 (defvar picp-adapt-to-window-size-change t)
-
-;;
-;; Buffer local variables.
-;;
-;; Currently most variables are global and there can only be one
-;; picpocket buffer at a time.
 (defvar picp-entry-function nil)
 (defvar picp-entry-args nil)
 (defvar picp-filter nil)
-(defvar picp-index nil
-  "The `picp-index' is starting from 1 (incompatible with elt).")
-(defvar picp-length nil)
+(defvar picp-filter-index nil)
+(defvar picp-compute-filter-index-from-scratch nil)
+(defvar picp-filter-match-count-done nil)
+(defvar picp-filter-match-count nil)
 (defvar picp-window-size nil
   "The current window size in pixels.
 This is kept for the benefit of timer functions that do not
 necessarily run with the picpocket window selected.")
 (defvar picp-header-text "")
+
+;; Variables displayed in the header-line must be marked as risky.
+(dolist (symbol '(picp-filter
+                  picp-filter-index
+                  picp-filter-match-count
+                  picp-header-text))
+  (put symbol 'risky-local-variable t))
+
+
+;;; The list of pictures
+
+(cl-defstruct picp-pos
+  current
+  index
+  filter-index)
+
+
 (defvar picp-list nil
   "The `picp-list' is a double-linked list of all pictures in directory.
 The car contains a `picp-pic' struct whose prev slot points to
@@ -333,11 +345,13 @@ the previous cons cell.  The next cell is in the cdr.
 Note that this is a circular data structure and `print-circle'
 need to be non-zero when printing it.  If it is nil Emacs will
 hang.")
+(defvar picp-length nil)
 (defvar picp-current nil)
+(defvar picp-index nil
+  "The `picp-index' is starting from 1 (incompatible with elt).")
 
 (put 'picp-index 'risky-local-variable t)
 (put 'picp-length 'risky-local-variable t)
-(put 'picp-header-text 'risky-local-variable t)
 (put 'picp-current 'risky-local-variable t)
 
 (cl-defstruct picp-pic
@@ -348,6 +362,7 @@ hang.")
   size
   bytes
   (rotation 0.0))
+
 
 (defsubst picp-pic (pic)
   (car (or pic picp-current)))
@@ -399,6 +414,15 @@ hang.")
 
 ;;; Macros
 
+;; Great macro from slime.el.
+(cl-defmacro picp-when-let ((var value) &rest body)
+  "Evaluate VALUE, if the result is non-nil bind it to VAR and eval BODY.
+\(fn (VAR VALUE) &rest BODY)"
+  (declare (debug ((symbolp form) body))
+           (indent defun))
+  `(let ((,var ,value))
+     (when ,var ,@body)))
+
 (defmacro picp-time-string (&rest forms)
   (declare (indent defun))
   `(picp-sec-string (cadr (picp-time ,@forms))))
@@ -429,12 +453,12 @@ with `cl-multiple-value-bind' etc."
   (let ((rc (make-symbol "rc"))
         (s (make-symbol "s"))
         (sum (make-symbol "sum")))
-  `(cl-destructuring-bind (,rc ,s) (picp-time (progn ,@body))
-     (let ((,sum (assq ,thing picp-clock-alist)))
-       (if ,sum
-           (setcdr ,sum (time-add ,s (cdr ,sum)))
-         (push (cons ,thing ,s) picp-clock-alist)))
-     ,rc)))
+    `(cl-destructuring-bind (,rc ,s) (picp-time (progn ,@body))
+       (let ((,sum (assq ,thing picp-clock-alist)))
+         (if ,sum
+             (setcdr ,sum (time-add ,s (cdr ,sum)))
+           (push (cons ,thing ,s) picp-clock-alist)))
+       ,rc)))
 
 (defmacro picp-with-clock (title &rest body)
   (declare (debug ((symbolp form) body))
@@ -448,13 +472,13 @@ with `cl-multiple-value-bind' etc."
 
 (define-derived-mode picp-mode special-mode "picpocket"
   (buffer-disable-undo)
-  (make-local-variable 'picp-index)
-  (make-local-variable 'picp-header-text)
-  (make-local-variable 'picp-list)
-  (make-local-variable 'picp-current)
-  (make-local-variable 'picp-length)
-  (setq-local image-type-file-name-regexps
-              (list (rassq 'imagemagick image-type-file-name-regexps)))
+  ;; Ensure imagemagick is preferred.
+  (unless (eq 'imagemagick (cdar image-type-file-name-regexps))
+    (let ((entry (rassq 'imagemagick image-type-file-name-regexps)))
+      (setq-local image-type-file-name-regexps
+                  (cons entry
+                        (delete entry
+                                (cl-copy-list image-type-file-name-regexps))))))
   (setq-local image-type-header-regexps nil)
   (picp-db-init)
   (setq cursor-type nil
@@ -529,10 +553,12 @@ with `cl-multiple-value-bind' etc."
   (define-key map [?\]] #'picp-rotate-clockwise)
   (define-key map [?{] #'picp-rotate-counter-clockwise-10-degrees)
   (define-key map [?}] #'picp-rotate-clockwise-10-degrees)
+  (define-key map [(meta ?\[)] #'picp-reset-rotation)
+  (define-key map [(meta ?\])] #'picp-reset-rotation)
   (define-key map [?+] #'picp-scale-in)
   (define-key map [?=] #'picp-scale-in)
   (define-key map [?-] #'picp-scale-out)
-  (define-key map [?0] #'picp-no-scale)
+  (define-key map [?0] #'picp-reset-scale)
   (define-key map [?b] #'picp-fit-to-width-and-height)
   (define-key map [?w] #'picp-fit-to-width)
   (define-key map [?h] #'picp-fit-to-height)
@@ -610,6 +636,12 @@ that."
   (picp-rotate 10.0 arg)
   (picp-update-buffer))
 
+(defun picp-reset-rotation ()
+  "Display the current picture as is without any rotation."
+  (interactive)
+  (picp-set-rotation picp-current 0.0)
+  (picp-update-buffer))
+
 (defun picp-rotate (delta arg)
   (let ((degrees (if arg
                      (float (read-number "Set rotation in degrees"
@@ -637,7 +669,7 @@ With prefix arg (ARG) read scale percent in minibuffer."
     (picp-alter-scale -10))
   (picp-update-buffer))
 
-(defun picp-no-scale ()
+(defun picp-reset-scale ()
   "Reset the scale to 100%."
   (interactive)
   (setq picp-scale 100)
@@ -648,8 +680,8 @@ With prefix arg (ARG) read scale percent in minibuffer."
   "Fit the picture to both width and height of window.
 Fitting is done before applying the scaling factor.  That is, it
 will fit only when the scaling is the default 100%.  The scaling
-can be restored to 100% by typing \\[picp-no-scale] \(for
-`picp-no-scale')."
+can be restored to 100% by typing \\[picp-reset-scale] \(for
+`picp-reset-scale')."
   (interactive)
   (setq picp-fit :x-and-y)
   (message "Fit picture to both width and height")
@@ -659,8 +691,8 @@ can be restored to 100% by typing \\[picp-no-scale] \(for
   "Fit the picture to the width of window.
 Fitting is done before applying the scaling factor.  That is, it
 will fit only when the scaling is the default 100%.  The scaling
-can be restored to 100% by typing \\[picp-no-scale] \(for
-`picp-no-scale')."
+can be restored to 100% by typing \\[picp-reset-scale] \(for
+`picp-reset-scale')."
   (interactive)
   (setq picp-fit :x)
   (message "Fit picture to width")
@@ -670,8 +702,8 @@ can be restored to 100% by typing \\[picp-no-scale] \(for
   "Fit the picture to the height of window.
 Fitting is done before applying the scaling factor.  That is, it
 will fit only when the scaling is the default 100%.  The scaling
-can be restored to 100% by typing \\[picp-no-scale] \(for
-`picp-no-scale')."
+can be restored to 100% by typing \\[picp-reset-scale] \(for
+`picp-reset-scale')."
   (interactive)
   (setq picp-fit :y)
   (message "Fit picture to height")
@@ -886,38 +918,60 @@ This hook make sure it is fitted to `picp-frame'."
   ;; set-window-buffer will update the fringes.
   (set-window-buffer (selected-window) (current-buffer)))
 
+
 (defun picp-next ()
   "Move to the next picture in the current list."
   (interactive)
-  (let ((next (picp-next-pic)))
+  (let ((next (picp-next-pos)))
     (if next
-        (picp-set-current next)
+        (picp-set-pos next)
       (picp-no-file "next")))
   (picp-update-buffer))
 
-(defun picp-next-pic ()
-  (cl-loop for pic = (cdr picp-current) then (cdr pic)
+(defun picp-next-pos (&optional pos)
+  (unless pos
+    (setq pos (picp-current-pos)))
+  (cl-loop for pic = (cdr (picp-pos-current pos)) then (cdr pic)
+           for index = (1+ (picp-pos-index pos)) then (1+ index)
            while pic
-           when (picp-filter-match-p pic) return pic))
+           when (picp-filter-match-p pic)
+           return (make-picp-pos :current pic
+                                 :index index
+                                 :filter-index
+                                 (when (picp-pos-filter-index pos)
+                                   (1+ (picp-pos-filter-index pos))))))
 
-(defun picp-set-current (pic)
-  (let ((inhibit-quit t))
-    (setq picp-current pic
-          picp-index (picp-calculate-index))))
+(defun picp-current-pos ()
+  (make-picp-pos :current picp-current
+                 :index picp-index
+                 :filter-index picp-filter-index))
+
+(defun picp-next-pic ()
+  (picp-when-let (pos (picp-next-pos))
+    (picp-pos-current pos)))
 
 (defun picp-previous ()
   "Move to the previous picture in the current list."
   (interactive)
-  (let ((prev (picp-previous-pic)))
+  (let ((prev (picp-previous-pos)))
     (if prev
-        (picp-set-current prev)
+        (picp-set-pos prev)
       (picp-no-file "previous")))
   (picp-update-buffer))
 
 (defun picp-previous-pic ()
+  (picp-when-let (pos (picp-previous-pos))
+    (picp-pos-current pos)))
+
+(defun picp-previous-pos ()
   (cl-loop for pic = (picp-safe-prev picp-current) then (picp-safe-prev pic)
+           for index = (1- picp-index) then (1- index)
            while pic
-           when (picp-filter-match-p pic) return pic))
+           when (picp-filter-match-p pic)
+           return (make-picp-pos :current pic
+                                 :index index
+                                 :filter-index (when picp-filter-index
+                                                 (1- picp-filter-index)))))
 
 (defun picp-safe-prev (pic)
   (when pic
@@ -926,27 +980,45 @@ This hook make sure it is fitted to `picp-frame'."
 (defun picp-home ()
   "Move to the first picture in the current list."
   (interactive)
-  (let ((inhibit-quit t))
-    (setq picp-current picp-list
-          picp-index 1))
+  (picp-set-pos (picp-first-pos))
+  (unless (picp-filter-match-p picp-current)
+    (let ((next (picp-next-pos)))
+      (if next
+          (picp-set-pos next)
+        (picp-no-file))))
   (picp-update-buffer))
+
+(defun picp-first-pos ()
+  (make-picp-pos :current picp-list
+                 :index 1
+                 :filter-index (if (picp-filter-match-p picp-list)
+                                   1
+                                 0)))
 
 (defun picp-end ()
   "Move to the last picture in the current list."
   (interactive)
-  (let ((inhibit-quit t))
-    (while (cdr picp-current)
-      (setq picp-current (cdr picp-current)
-            picp-index (1+ picp-index))))
+  (picp-set-pos (picp-last-pos))
+  (unless (picp-filter-match-p picp-current)
+    (let ((prev (picp-previous-pos)))
+      (if prev
+          (picp-set-pos prev)
+        (picp-no-file))))
   (picp-update-buffer))
 
+(defun picp-last-pos ()
+  (cl-loop for pic on picp-current
+           for index = picp-index then (1+ index)
+           when (null (cdr pic))
+           return (make-picp-pos :current pic
+                                 :index index)))
 
 (defun picp-delete-file ()
   "Permanently delete the current picture file."
   (interactive)
   (let ((file (picp-file)))
-    (when (if picp-ask-before-delete
-              (picp-y-or-n-p "Delete %s? " file)
+    (when (if picp-confirm-delete
+              (picp-y-or-n-p "Delete file %s from disk? " file)
             t)
       (picp-delete)
       (message "%s is no more." file)
@@ -1105,7 +1177,8 @@ remove the tag from all pictures instead."
   (interactive "P")
   (if all
       (picp-tag-to-all (picp-read-key-to-add-or-remove-tag nil t))
-    (picp-action 'tag (picp-read-key-to-add-or-remove-tag))))
+    (picp-action 'tag (picp-read-key-to-add-or-remove-tag)))
+  (picp-update-buffer))
 
 (defun picp-edit-tags (&optional all)
   "Edit the tags associated with current picture.
@@ -1123,6 +1196,7 @@ instead."
            (new-tags-string (read-string "Tags: " old-tags-string))
            (new-tag-symbols (mapcar #'intern (split-string new-tags-string))))
       (picp-tags-set picp-current new-tag-symbols)
+      (picp-update-buffer)
       (message "Tags for %s is %s."
                (picp-file)
                (if new-tag-symbols
@@ -1142,18 +1216,25 @@ spaces.
 When called from Lisp the argument FILTER-STRING is a
 space-separated string."
   (interactive (list (read-string "Show only pictures with this tag: ")))
-  (setq picp-filter (mapcar #'intern (split-string filter-string)))
+  (picp-do-set-filter (mapcar #'intern (split-string filter-string)))
   (picp-update-buffer))
+
+(defun picp-do-set-filter (filter)
+  (setq picp-filter filter
+        picp-filter-index nil
+        picp-compute-filter-index-from-scratch t
+        picp-filter-match-count nil
+        picp-filter-match-count-done nil))
 
 (defun picp-filter-match-p (pic)
   (cl-subsetp picp-filter (picp-tags pic)))
 
-(defun picp-no-file (&optional text)
-  (when text
-    (setq text (concat " " text)))
-  (if picp-filter
-      (user-error "No%s file match filter %s" text picp-filter)
-    (user-error "No%s file" text)))
+(defun picp-no-file (&optional direction)
+  (user-error (picp-join "No"
+                         direction
+                         "file"
+                         (when picp-filter
+                           (format "match filter %s" picp-filter)))))
 
 (defun picp-set-filter-by-keystroke ()
   "Show only pictures having the tag in the current filter."
@@ -1172,9 +1253,12 @@ space-separated string."
 
 (defun picp-jump-to-index (string)
   (when (string-match "^[0-9]+$" string)
-    (let ((pic (picp-pic-by-index (string-to-number string))))
-      (when pic
-        (picp-set-current pic)))))
+    (let ((index (string-to-number string)))
+      (picp-when-let (pic (picp-pic-by-index index))
+        (picp-set-pos (make-picp-pos :current pic
+                                     :index index))
+        t))))
+
 
 (defun picp-pic-by-index (n)
   (and (< 0 n)
@@ -1184,28 +1268,31 @@ space-separated string."
                 finally return pic)))
 
 (defun picp-jump-to-file (file)
-  (let ((pic-list (picp-pics-by-file file)))
-    (cond ((null pic-list)
+  (let ((pos-list (picp-pos-list-by-file file)))
+    (cond ((null pos-list)
            (user-error "Picture not found (%s)" file))
-          ((eq 1 (length pic-list))
-           (picp-set-current (car pic-list)))
+          ((eq 1 (length pos-list))
+           (picp-set-pos (car pos-list)))
           (t
            (let ((prompt (format "%s is available in %s directories.  Select: "
-                                 file (length pic-list))))
-             (picp-set-current (picp-select-pic-by-dir pic-list prompt)))))))
+                                 file (length pos-list))))
+             (picp-set-pos (picp-select-pos-by-dir pos-list prompt))
+             t)))))
 
-(defun picp-pics-by-file (file)
+(defun picp-pos-list-by-file (file)
   (cl-loop for pic on picp-list
+           for index = 1 then (1+ index)
            when (equal (picp-file pic) file)
-           collect pic))
+           collect (make-picp-pos :current pic
+                                  :index index)))
 
-(defun picp-select-pic-by-dir (pic-list prompt)
-  (let* ((dirs (cl-loop for pic in pic-list
-                        collect (picp-dir pic)))
+(defun picp-select-pos-by-dir (pos-list prompt)
+  (let* ((dirs (cl-loop for pos in pos-list
+                        collect (picp-dir (picp-pos-current pos))))
          (dir (completing-read prompt dirs nil t)))
-    (cl-loop for pic in pic-list
-             when (equal dir (picp-dir pic))
-             return pic)))
+    (cl-loop for pos in pos-list
+             when (equal dir (picp-dir (picp-pos-current pos)))
+             return pos)))
 
 
 ;;; Pic double-linked list functions.
@@ -1216,41 +1303,67 @@ space-separated string."
   (list (make-picp-pic :dir (file-name-directory path)
                        :file (file-name-nondirectory path))))
 
-(defun picp-reset ()
+(defun picp-reset-list ()
   (setq picp-list nil
-        picp-current nil
-        picp-index 0
-        picp-length 0
-        picp-filter nil))
+        picp-length 0)
+  (picp-set-pos (make-picp-pos))
+  (picp-do-set-filter nil))
+
+(defun picp-set-pos (pos)
+  (let ((inhibit-quit t))
+    (setq picp-current (picp-pos-current pos)
+          picp-index (or (picp-pos-index pos)
+                         (picp-calculate-index picp-current))
+          picp-filter-index (picp-pos-filter-index pos)
+          picp-compute-filter-index-from-scratch (null picp-filter-index))))
+
+
+(defun picp-calculate-index (&optional current)
+  (when picp-list
+    (cl-loop for pic on picp-list
+             count 1
+             until (eq pic (or current picp-current)))))
 
 (defun picp-delete ()
   (let ((file (picp-path)))
-    (let ((inhibit-quit t))
+    (let ((inhibit-quit t)
+          (filter-match (picp-filter-match-p picp-current)))
       (delete-file file)
       (picp-tags-delete-file picp-current file)
-      (picp-delete-pic picp-current))))
+      (picp-delete-pic picp-current (list filter-match)))))
 
-(defun picp-delete-pic (&optional pic)
+(defun picp-delete-pic (&optional pic filter-match-cell)
   (setq pic (or pic
                 picp-current))
-  (clear-image-cache (picp-path pic))
-  (setq picp-length (1- picp-length))
-  (if (picp-prev pic)
-      (setcdr (picp-prev pic) (cdr pic))
-    (setq picp-list (cdr pic)))
-  (if (cdr pic)
-      (progn
-        (picp-set-prev (cdr pic) (picp-prev pic))
-        (when (eq picp-current pic)
-          (setq picp-current (cdr pic))))
+  (let ((filter-match (if filter-match-cell
+                          (car filter-match-cell)
+                        (picp-filter-match-p pic))))
+    (clear-image-cache (picp-path pic))
+    (setq picp-length (1- picp-length))
+    (when picp-filter
+      (if picp-filter-match-count-done
+          (when filter-match
+            (cl-decf picp-filter-match-count))
+        (setq picp-filter-match-count nil))
+      (setq picp-filter-index nil
+            picp-compute-filter-index-from-scratch t))
     (if (picp-prev pic)
-        (when (eq picp-current pic)
-          (setq picp-current (picp-prev pic)))
-      (picp-reset)))
-  (setq picp-index (picp-calculate-index)))
+        (setcdr (picp-prev pic) (cdr pic))
+      (setq picp-list (cdr pic)))
+    (if (cdr pic)
+        (progn
+          (picp-set-prev (cdr pic) (picp-prev pic))
+          (when (eq picp-current pic)
+            (picp-set-pos (make-picp-pos :current (cdr pic)
+                                         :index picp-index))))
+      (if (picp-prev pic)
+          (when (eq picp-current pic)
+            (picp-set-pos (make-picp-pos :current (picp-prev pic)
+                                         :index (1- picp-index))))
+        (picp-reset-list)))))
 
 (defun picp-create-picp-list (files &optional selected-file)
-  (picp-reset)
+  (picp-reset-list)
   (setq picp-list
         (cl-loop for path in files
                  for dir = (file-truename (file-name-directory path))
@@ -1271,10 +1384,10 @@ space-separated string."
                         for index = 1 then (1+ index)
                         when (equal selected-file
                                     (concat (picp-dir pic) (picp-file pic)))
-                        return (setq picp-index index
-                                     picp-current pic)))
-    (setq picp-index 1
-          picp-current picp-list)))
+                        return (picp-set-pos (make-picp-pos :current pic
+                                                            :index index))))
+    (picp-set-pos (make-picp-pos :current picp-list
+                                 :index 1))))
 
 
 
@@ -1289,9 +1402,22 @@ space-separated string."
   (picp-db-tags (picp-sha-via-cache pic)))
 
 (defun picp-tags-set (pic new-tags)
-  (picp-db-tags-set (picp-sha-via-cache pic)
-                    (picp-path pic)
-                    new-tags))
+  (let ((match-before (picp-filter-match-p pic)))
+    (picp-db-tags-set (picp-sha-via-cache pic)
+                      (picp-path pic)
+                      new-tags)
+    (let ((match-after (picp-filter-match-p pic)))
+      (when (picp-xor match-before match-after)
+        (setq picp-compute-filter-index-from-scratch t
+              picp-filter-index nil)
+        (if picp-filter-match-count-done
+            (cl-incf picp-filter-match-count (if match-after 1 -1))
+          (setq picp-filter-match-count nil
+                picp-filter-match-count-done nil))))))
+
+(defun picp-xor (a b)
+  (not (eq (not a) (not b))))
+
 
 (defun picp-tags-move-file (pic old-file new-file)
   (picp-db-tags-move-file (picp-sha-via-cache pic) old-file new-file))
@@ -1587,8 +1713,8 @@ be called."
 (defun picp-insert-file-list (list)
   (dolist (entry list)
     (insert "  "
-            (picp-separate (car entry)
-                           (picp-format-tags (cadr entry)))
+            (picp-join (car entry)
+                       (picp-format-tags (cadr entry)))
             "\n")))
 
 (define-derived-mode picp-db-mode special-mode "picpocket-db"
@@ -1882,7 +2008,9 @@ be called."
     (picp-look-ahead-next 0.2)
     ;; PENDING
     ;; (picp-look-ahead-more 2)
-    (picp-travserse-pic-list 4)
+    (picp-compute-filter-index 0.5)
+    (picp-compute-filter-match-count 1)
+    (picp-travserse-pic-list 3)
     (picp-save-journal 60)
     (picp-update-header picp-update-header-seconds)))
 (defvar picp-inhibit-timers nil)
@@ -1959,12 +2087,52 @@ be called."
 
 (defun picp-travserse-pic-list (deadline-function state)
   (with-current-buffer picp-buffer
-    (cl-loop for pic on (or state picp-list)
+    (cl-loop for pic on (picp-continue-or-start-over state)
              do (progn
                   (picp-sha-via-cache pic)
                   ;; PENDING - may push out look ahead from cache?
                   (picp-size-via-cache pic))
              until (funcall deadline-function pic))))
+
+(defun picp-continue-or-start-over (state)
+  "Continue from saved STATE or start from scratch if STATE is invalid.
+STATE is the last pic the idle timer worked on.  If that for
+example have been deleted from the picture list then the state is
+considered invalid and we start from the beginning again."
+  (or (and state
+           (memq state picp-list))
+      picp-list))
+
+(defun picp-compute-filter-match-count (deadline-function state)
+  (with-current-buffer picp-buffer
+    (when (and picp-filter
+               (not picp-filter-match-count-done))
+      (when (or (null picp-filter-match-count)
+                (and state
+                     (not (memq state picp-list))))
+        (setq state picp-list
+              picp-filter-match-count 0))
+      (unless (cl-loop for pic on state
+                       do (when (picp-filter-match-p pic)
+                            (cl-incf picp-filter-match-count))
+                       when (funcall deadline-function pic)
+                       return t)
+        (setq picp-filter-match-count-done t)))))
+
+(defun picp-compute-filter-index (deadline-function state)
+  (with-current-buffer picp-buffer
+    (when (and picp-filter
+               (null picp-filter-index))
+      (when (or (null state)
+                picp-compute-filter-index-from-scratch
+                (not (memq state picp-list)))
+        (setq state (picp-first-pos)))
+      (cl-loop for pos = state then (picp-next-pos pos)
+               when (eq (picp-pos-current pos) picp-current)
+               return (setq picp-filter-index (picp-pos-filter-index pos))
+               until (funcall deadline-function pos)))))
+
+
 
 (defun picp-maybe-save-journal (&rest ignored)
   (when (> (picp-db-journal-size) 100)
@@ -1975,11 +2143,11 @@ be called."
     (picp-db-save)))
 
 (defun picp-look-ahead-next (&rest ignored)
-  (let ((next (or (picp-next-pic) (picp-previous-pic))))
-    (when (and next
-               (not (eq next picp-last-look-ahead)))
-      (picp-look-ahead-and-save-time next)
-      (setq picp-last-look-ahead next))))
+  (let ((pic (or (picp-next-pic) (picp-previous-pic))))
+    (when (and pic
+               (not (eq pic picp-last-look-ahead)))
+      (picp-look-ahead-and-save-time pic)
+      (setq picp-last-look-ahead pic))))
 
 
 (defun picp-look-ahead-more (deadline-function ignored)
@@ -2004,28 +2172,20 @@ be called."
 (defun picp-do-update-buffer ()
   (unless (equal (buffer-name) picp-buffer)
     (error "This requires picpocket mode"))
-  (if (picp-ensure-matching-current-pic)
+  (if (picp-try-ensure-matching-picture)
       (progn
         (picp-insert picp-current)
         (cd (picp-dir)))
     (picp-no-pictures))
   (force-mode-line-update))
 
-(defun picp-ensure-matching-current-pic ()
+(defun picp-try-ensure-matching-picture ()
   "Return nil if no matching picture was found."
   (when picp-current
     (or (picp-filter-match-p picp-current)
-        (let ((pic (or (picp-next-pic) (picp-previous-pic))))
-          (when pic
-            (let ((inhibit-quit t))
-              (setq picp-current pic
-                    picp-index (picp-calculate-index))))))))
-
-
-(defun picp-calculate-index (&optional current)
-  (cl-loop for pic on picp-list
-           count 1
-           until (eq pic (or current picp-current))))
+        (picp-when-let (pos (or (picp-next-pos) (picp-previous-pos)))
+          (picp-set-pos pos)
+          t))))
 
 (defun picp-no-pictures ()
   (let (buffer-read-only)
@@ -2057,8 +2217,8 @@ be called."
 
 
 (defun picp-create-buffer (files &optional selected-file dir)
-  (unless (picp-imagemagick-p)
-    (error "Picpocket requires Emacs compiled with imagemagick support"))
+  ;; (unless (picp-imagemagick-p)
+  ;; (error "Picpocket requires Emacs compiled with imagemagick support"))
   (setq selected-file (and selected-file
                            (file-truename selected-file)))
   (let ((old-buffer (get-buffer picp-buffer)))
@@ -2070,7 +2230,7 @@ be called."
       (cd dir))
     (condition-case err
         (picp-create-picp-list files selected-file)
-      (quit (picp-reset)
+      (quit (picp-reset-list)
             (signal (car err) (cdr err))))
     (picp-update-buffer)
     (if (called-interactively-p 'any)
@@ -2096,8 +2256,8 @@ This is for the benefit of timer functions that do not
 necessarily run with the picpocket window selected."
   (cl-destructuring-bind (x0 y0 x1 y1) (window-inside-pixel-edges)
     ;; PENDING - For some reason Emacs 25.0 refuses to draw image in a
-    ;; right margin that seem to be (frame-char-width) pixels wide so
-    ;; subtract that.
+    ;; right margin that seem to be (frame-char-width) pixels wide.
+    ;; Therefore subtract that.
     (setq picp-window-size (cons (- x1 x0 (frame-char-width))
                                  (- y1 y0)))))
 
@@ -2105,7 +2265,11 @@ necessarily run with the picpocket window selected."
   (pcase-let ((`(,keyword . ,value) (picp-clock
                                      (picp-size-param pic canvas-size))))
     (create-image (picp-path pic)
-                  'imagemagick nil
+                  ;; PENDING - Seem like imagemagick svg support is
+                  ;; somewhat broken.
+                  (unless (string-suffix-p ".svg" (picp-file pic) t)
+                    'imagemagick)
+                  nil
                   :rotation (picp-rotation pic)
                   keyword (picp-scale value))))
 
@@ -2141,7 +2305,7 @@ necessarily run with the picpocket window selected."
 
 (defun picp-save-size-in-pic (pic)
   (picp-set-size pic (image-size (create-image (picp-path pic)
-                                               'imagemagick nil
+                                               nil nil
                                                :rotation 0)
                                  t)))
 
@@ -2149,7 +2313,7 @@ necessarily run with the picpocket window selected."
   (if (zerop (picp-rotation pic))
       (picp-size-via-cache pic)
     (image-size (create-image (picp-path pic)
-                              'imagemagick nil
+                              nil nil
                               :rotation (picp-rotation pic))
                 t)))
 
@@ -2178,10 +2342,6 @@ necessarily run with the picpocket window selected."
   (setq picp-scale
         (max 10 (+ picp-scale delta)))
   (message "Scaling factor is %s%%" picp-scale))
-
-(defun picp-scale-info ()
-  (unless (eq picp-scale 100)
-    (format "%s%%%%" picp-scale)))
 
 (defun picp-imagemagick-p ()
   (picp-picture-regexp))
@@ -2333,7 +2493,8 @@ necessarily run with the picpocket window selected."
   (let ((symbol (intern (picp-command-name 'tag tag))))
     (fset symbol `(lambda ()
                     (interactive)
-                    (picp-action 'tag ,tag)))
+                    (picp-action 'tag ,tag)
+                    (picp-update-buffer)))
     (put symbol 'picp-user-command 'tag)
     symbol))
 
@@ -2700,17 +2861,18 @@ Third invocation will hide the help."
 ;; PENDING - keeping this debug stuff for now.
 (defvar picp-start (current-time))
 (defun picp-msg (&rest args)
-  (with-current-buffer (get-buffer-create "*piclog*")
-    (save-excursion
-      (goto-char (point-max))
-      (insert (format "%f %s\n"
-                      (time-to-seconds (time-since picp-start))
-                      (mapconcat (lambda (x)
-                                   (if (stringp x)
-                                       x
-                                     (prin1-to-string x)))
-                                 args
-                                 " "))))))
+  (when nil
+    (with-current-buffer (get-buffer-create "*piclog*")
+      (save-excursion
+        (goto-char (point-max))
+        (insert (format "%f %s\n"
+                        (time-to-seconds (time-since picp-start))
+                        (mapconcat (lambda (x)
+                                     (if (stringp x)
+                                         x
+                                       (prin1-to-string x)))
+                                   args
+                                   " ")))))))
 
 ;; (add-hook 'echo-area-clear-hook #'jcl-clear-echo)
 ;; (defun jcl-clear-echo ()
@@ -2719,28 +2881,27 @@ Third invocation will hide the help."
 
 (defun picp-header-pic-info ()
   (when picp-current
-    (picp-separate
-     (concat (format "%s/%s " picp-index picp-length)
-             (picp-escape-percent (picp-header-dir))
-             "/"
-             (propertize (picp-escape-percent (picp-file))
-                         'face 'highlight))
-     (when picp-debug
-       picp-header-text)
-     (picp-pic-kb picp-current)
-     (picp-scale-info)
-     (picp-format-tags (picp-tags picp-current))
-     (when picp-filter
-       (format "filter:%s" picp-filter)))))
+    (picp-join (concat (format "%s/%s " picp-index picp-length)
+                       (picp-escape-percent (picp-header-dir))
+                       "/"
+                       (propertize (picp-escape-percent (picp-file))
+                                   'face 'highlight))
+               (when picp-debug
+                 picp-header-text)
+               (picp-pic-kb picp-current)
+               (picp-scale-info)
+               (picp-rotation-info)
+               (picp-format-tags (picp-tags picp-current))
+               (picp-filter-info))))
+
+(defun picp-join (&rest strings)
+  (mapconcat 'identity
+             (delete nil (delete "" strings))
+             " "))
 
 (defun picp-escape-percent (string)
   (when string
     (replace-regexp-in-string "%" "%%" string)))
-
-(defun picp-separate (&rest strings)
-  (mapconcat 'identity
-             (delete nil (delete "" strings))
-             " "))
 
 (defun picp-header-dir ()
   (if picp-header-full-path
@@ -2771,17 +2932,34 @@ Third invocation will hide the help."
       (format "%sk" (/ bytes 1024))
     (format "%s" bytes)))
 
-(defun picp-maybe-space (string)
-  (if (and string
-           (not (string-equal string "")))
-      (concat " " string)
-    ""))
+(defun picp-scale-info ()
+  (unless (eq picp-scale 100)
+    (format "%s%%%%" picp-scale)))
+
+(defun picp-rotation-info ()
+  (let ((degrees (picp-rotation picp-current)))
+    (unless (zerop degrees)
+      (format "%s°" (truncate degrees)))))
 
 (defun picp-format-tags (tags)
   (when tags
     (cl-case picp-tags-style
       (org (format ":%s:" (mapconcat #'symbol-name tags ":")))
       (t (format "(%s)" (mapconcat #'symbol-name tags " "))))))
+
+(defun picp-filter-info ()
+  (when picp-filter
+    (format "(filter: %s %s/%s)"
+            (mapconcat 'symbol-name picp-filter " ")
+            (or picp-filter-index "?")
+            (cond (picp-filter-match-count-done
+                   picp-filter-match-count)
+                  ((null picp-filter-match-count)
+                   "?")
+                  ((zerop picp-filter-match-count)
+                   "?")
+                  (t
+                   (format "%s+" picp-filter-match-count))))))
 
 
 ;;; Misc help functions
@@ -2910,18 +3088,42 @@ Third invocation will hide the help."
   (setq picp-sum 0)
   (message "Clear image cache %s" (picp-time-string (clear-image-cache t))))
 
-(defun picp-dump-list ()
-  "Print the current picture list without the prev links.
-With the prev links it is harder to follow the list."
-  (interactive)
-  (pp (with-current-buffer picp-buffer
-      (cl-loop for pic in picp-list
-               for copy = (copy-picp-pic pic)
-               do (setf (picp-pic-prev copy) :prev)
-               collect copy)))
-  (message "")
-  (view-echo-area-messages))
 
+(defun picp-dump ()
+  "Print some picpocket variables."
+  (interactive)
+  (picp-print 'picp-list)
+  (picp-print 'picp-current)
+  (picp-print 'picp-index)
+  (picp-print 'picp-length)
+  (message "")
+  (view-echo-area-messages)
+  t)
+
+(defun picp-print (var)
+  (let ((value (symbol-value var)))
+    (and (listp value)
+         (picp-pic-p (car value))
+         (setq value (picp-simplify-list value)))
+    (message "%-20s%s"
+             var
+             (with-temp-buffer
+               (pp value (current-buffer))
+               (goto-char (point-min))
+               (forward-line)
+               (indent-rigidly (point) (point-max) 20)
+               (buffer-string)))))
+
+(defun picp-simplify-list (&optional list)
+  "Print the LIST or current picture list without the prev links.
+With the prev links it is harder to follow the list."
+  (cl-loop for pic in (or list picp-list)
+           for copy = (copy-picp-pic pic)
+           do (setf (picp-pic-prev copy) :prev)
+           collect copy))
+
+(defun picp-dump-list (&optional list)
+  (pp (picp-simplify-list list)))
 
 (provide 'picpocket)
 
