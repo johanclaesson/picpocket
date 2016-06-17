@@ -1,2 +1,2 @@
 # picpocket
-Image viewer for Emacs
+Image viewer and tagger for Emacs

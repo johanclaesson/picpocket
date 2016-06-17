@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2015-07-19 16:33:54 jcl>
-;; Version: 16
+;; Time-stamp: <2016-06-17 17:38:17 jcl>
+;; Version: 17
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -144,11 +144,13 @@
 ;;; Code:
 
 ;; TODO.
+;; * Inform user that svg image cannot be rotated on attempt.
+;; * Browse tag database.
 ;; * Use same default sort order as dired?
 ;; * Why is look ahead slower in version 13 than in 12.x?
 ;; * Worthwhile to delay calculation of picp-bytes to idle timer?
 ;; * Remove all &optional before pic.
-;; * defvar -> defcustom where appropriate.
+;; * defvar -> defcustom where appropriate?
 ;; * Command to show all pictures in database with certain tags.
 ;; * Logical operators for filters
 ;;   filter: !bw manga
@@ -294,7 +296,7 @@ This option concerns only symlinks that points to directories.")
 
 ;;; Internal variables
 
-(defconst picp-version 16)
+(defconst picp-version 17)
 (defconst picp-buffer "*picpocket*")
 
 (defvar picp-frame nil)
@@ -480,6 +482,8 @@ with `cl-multiple-value-bind' etc."
                         (delete entry
                                 (cl-copy-list image-type-file-name-regexps))))))
   (setq-local image-type-header-regexps nil)
+  (when (boundp 'image-scaling-factor)
+    (setq-local image-scaling-factor 1.0))
   (picp-db-init)
   (setq cursor-type nil
         truncate-lines t
@@ -1076,7 +1080,8 @@ When called from Lisp DST is the destination directory."
                        (when (boundp 'ido-read-file-name-non-ido)
                          (add-to-list 'ido-read-file-name-non-ido
                                       #'picp-rename))
-                       (read-file-name "To: " (picp-path)))))
+                       (read-file-name "To: " nil (picp-file) nil
+                                       (picp-file)))))
   (picp-action 'move dst)
   (picp-update-buffer))
 
@@ -2265,13 +2270,15 @@ necessarily run with the picpocket window selected."
   (pcase-let ((`(,keyword . ,value) (picp-clock
                                      (picp-size-param pic canvas-size))))
     (create-image (picp-path pic)
-                  ;; PENDING - Seem like imagemagick svg support is
-                  ;; somewhat broken.
-                  (unless (string-suffix-p ".svg" (picp-file pic) t)
-                    'imagemagick)
+                  (picp-image-type pic)
                   nil
                   :rotation (picp-rotation pic)
                   keyword (picp-scale value))))
+
+(defun picp-image-type (pic)
+  (unless (string-suffix-p ".svg" (picp-file pic) t)
+    'imagemagick))
+
 
 (defun picp-size-param (pic canvas-size)
   (pcase-let ((canvas-ratio (picp-cons-ratio canvas-size))
@@ -2305,15 +2312,18 @@ necessarily run with the picpocket window selected."
 
 (defun picp-save-size-in-pic (pic)
   (picp-set-size pic (image-size (create-image (picp-path pic)
-                                               nil nil
-                                               :rotation 0)
+                                               (picp-image-type pic)
+                                               nil
+                                               :rotation 0.0)
                                  t)))
 
 (defun picp-rotated-size (pic)
-  (if (zerop (picp-rotation pic))
+  (if (or (zerop (picp-rotation pic))
+          (not (eq 'imagemagick (picp-image-type pic))))
       (picp-size-via-cache pic)
     (image-size (create-image (picp-path pic)
-                              nil nil
+                              (picp-image-type pic)
+                              nil
                               :rotation (picp-rotation pic))
                 t)))
 
