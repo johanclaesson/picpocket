@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2016-06-17 17:38:17 jcl>
-;; Version: 17
+;; Time-stamp: <2016-06-17 21:51:29 jcl>
+;; Version: 18
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -144,24 +144,13 @@
 ;;; Code:
 
 ;; TODO.
-;; * Inform user that svg image cannot be rotated on attempt.
 ;; * Browse tag database.
 ;; * Use same default sort order as dired?
 ;; * Why is look ahead slower in version 13 than in 12.x?
 ;; * Worthwhile to delay calculation of picp-bytes to idle timer?
 ;; * Remove all &optional before pic.
-;; * defvar -> defcustom where appropriate?
-;; * Command to show all pictures in database with certain tags.
-;; * Logical operators for filters
-;;   filter: !bw manga
-;;   ! means NOT, space means AND, comma means OR.
-;; * Another hash table mapping truenames to sha.
-;;   Filter will be slow without it.  Store also mtime and trust cache
-;;   while mtime stays the same.
-;; ** This will make it cheap to recover lost connections like
-;;    `picp-db-update' for single files.
 ;; * Move and delete commands are not executed immediately.  They are
-;;   stored in a action slot in struct pic.  All actions are executed
+;;   stored in an action slot in struct pic.  All actions are executed
 ;;   on ### or so.  Maybe the action slot should be a list of
 ;;   actions.
 ;; ** Optionally do execute the actions eventually.  There is a queue
@@ -170,17 +159,21 @@
 ;;    thumbnails.
 ;; ** Undo command that undoes one pending action at a time.
 ;; * PENDING comments.
-;; * Idle timer that computes index/max for filter and puts it in
-;;   header line.
 ;; * If target starts with / or ~ it will always be absolute.
 
 ;; NICE
-;; * Smoother movement commands (when picture is bigger than window)
+;; * Logical operators for filters
+;;   filter: !bw manga
+;;   ! means NOT, space means AND, comma means OR.
+;; * Another hash table mapping truenames to sha.
+;;   Filter will be slow without it.  Store also mtime and trust cache
+;;   while mtime stays the same.
+;; ** This will make it cheap to recover lost connections like
+;;    `picp-db-update' for single files.
 ;; * The tags for a filename is it's directory name plus the picp-tags.
 ;; * Underscores and dashes should be ignored in tag names.
 ;; * Activate picp-look-ahead-more
 ;; ** Maybe implement resume timers for it
-;; * See quit-window.  Should quit-restore delete full-screen frame?
 ;; * Command with ido over the defined shortcuts.
 ;; * Generate doc for generated commands.
 ;; * Call elpa/eimp for permanent rotation etc.
@@ -217,6 +210,7 @@
 ;;   picp-compare.  This will make picp-compare also adapt to window
 ;;   size changes.  Not worth the effort for only picp-compare but if
 ;;   more different drawing functions appears then maybe.
+;; * defvar -> defcustom where appropriate
 
 (eval-when-compile
   (require 'time-date)
@@ -260,14 +254,28 @@ to do this is to define it with `defcustom' like this:
  (setq picp-keystroke-alist 'my-picp-alist)
  (put 'my-picp-alist 'risky-local-variable t)")
 
+(defvar picp-filter-consider-dir-as-tag t
+  "Whether filter will consider the directory as a tag.
+
+If non-nil add the containing directory name to the list of tags
+stored in database.  This matters only when considering a filter.
+For example the potential extra tag is not shown in the list of
+tags in the header line.
+
+The special value `all' means add all directories in the whole
+path (after all soft links have been resolved).")
+
+
 (defgroup picpocket nil "Picture viewer."
   :group 'picpocket)
+
 (defcustom picp-fit :x-and-y
   "Fit picture size to window when non-nil."
   :type '(choice (const :tag "Fit to both width and height" :x-and-y)
                  (const :tag "Fit to width" :x)
                  (const :tag "Fit to height" :y)
                  (const :tag "Show picture in it's natural size" nil)))
+
 (defcustom picp-scale 100
   "Picture scaling in percent."
   :type 'integer)
@@ -296,7 +304,7 @@ This option concerns only symlinks that points to directories.")
 
 ;;; Internal variables
 
-(defconst picp-version 17)
+(defconst picp-version 18)
 (defconst picp-buffer "*picpocket*")
 
 (defvar picp-frame nil)
@@ -651,6 +659,7 @@ that."
                      (float (read-number "Set rotation in degrees"
                                          (picp-rotation)))
                    (+ (picp-rotation) delta))))
+    (picp-error-if-rotation-is-unsupported)
     (picp-set-rotation picp-current degrees)
     (picp-update-buffer)))
 
@@ -662,6 +671,7 @@ With prefix arg (ARG) read scale percent in minibuffer."
   (if arg
       (setq picp-scale (read-number "Scale factor: " picp-scale))
     (picp-alter-scale 10))
+  (picp-warn-if-scaling-is-unsupported)
   (picp-update-buffer))
 
 (defun picp-scale-out (arg)
@@ -671,6 +681,7 @@ With prefix arg (ARG) read scale percent in minibuffer."
   (if arg
       (setq picp-scale (read-number "Scale factor: " picp-scale))
     (picp-alter-scale -10))
+  (picp-warn-if-scaling-is-unsupported)
   (picp-update-buffer))
 
 (defun picp-reset-scale ()
@@ -689,6 +700,7 @@ can be restored to 100% by typing \\[picp-reset-scale] \(for
   (interactive)
   (setq picp-fit :x-and-y)
   (message "Fit picture to both width and height")
+  (picp-warn-if-scaling-is-unsupported)
   (picp-update-buffer))
 
 (defun picp-fit-to-width ()
@@ -700,6 +712,7 @@ can be restored to 100% by typing \\[picp-reset-scale] \(for
   (interactive)
   (setq picp-fit :x)
   (message "Fit picture to width")
+  (picp-warn-if-scaling-is-unsupported)
   (picp-update-buffer))
 
 (defun picp-fit-to-height ()
@@ -711,6 +724,7 @@ can be restored to 100% by typing \\[picp-reset-scale] \(for
   (interactive)
   (setq picp-fit :y)
   (message "Fit picture to height")
+  (picp-warn-if-scaling-is-unsupported)
   (picp-update-buffer))
 
 (defun picp-no-fit ()
@@ -1218,6 +1232,10 @@ The filter is a list of tags.  Only pictures with all the tags in
 the filter is shown.  To enter multiple tags separate them with
 spaces.
 
+If `picp-filter-consider-dir-as-tag' is non-nil also the
+containing directory counts as a tag as far as the filter is
+concerned.
+
 When called from Lisp the argument FILTER-STRING is a
 space-separated string."
   (interactive (list (read-string "Show only pictures with this tag: ")))
@@ -1232,7 +1250,17 @@ space-separated string."
         picp-filter-match-count-done nil))
 
 (defun picp-filter-match-p (pic)
-  (cl-subsetp picp-filter (picp-tags pic)))
+  (cl-subsetp picp-filter
+              (append (picp-tags pic)
+                      (picp-extra-tags-for-filter pic))))
+
+(defun picp-extra-tags-for-filter (pic)
+  (mapcar #'intern
+          (pcase picp-filter-consider-dir-as-tag
+            (`nil nil)
+            (`all (split-string (picp-dir pic) "/" t))
+            (t (list (file-name-nondirectory
+                      (directory-file-name (picp-dir pic))))))))
 
 (defun picp-no-file (&optional direction)
   (user-error (picp-join "No"
@@ -1305,7 +1333,7 @@ space-separated string."
 ;; These will call tag handling functions.
 
 (defun picp-make-pic (path)
-  (list (make-picp-pic :dir (file-name-directory path)
+  (list (make-picp-pic :dir (file-truename (file-name-directory path))
                        :file (file-name-nondirectory path))))
 
 (defun picp-reset-list ()
@@ -2133,6 +2161,7 @@ considered invalid and we start from the beginning again."
                 (not (memq state picp-list)))
         (setq state (picp-first-pos)))
       (cl-loop for pos = state then (picp-next-pos pos)
+               while pos
                when (eq (picp-pos-current pos) picp-current)
                return (setq picp-filter-index (picp-pos-filter-index pos))
                until (funcall deadline-function pos)))))
@@ -2202,7 +2231,7 @@ considered invalid and we start from the beginning again."
                         'face 'bold))
     (when picp-filter
       (insert (format "Type %s to edit filter.\n"
-                      (picp-where-is 'picp-filter))))
+                      (picp-where-is 'picp-set-filter))))
     (and (eq picp-entry-function 'picpocket-dir)
          (not picp-recursive)
          (insert
@@ -2278,6 +2307,14 @@ necessarily run with the picpocket window selected."
 (defun picp-image-type (pic)
   (unless (string-suffix-p ".svg" (picp-file pic) t)
     'imagemagick))
+
+(defun picp-error-if-rotation-is-unsupported ()
+  (unless (eq (picp-image-type picp-current) 'imagemagick)
+    (error "Svg images cannot be rotated")))
+
+(defun picp-warn-if-scaling-is-unsupported ()
+  (unless (eq (picp-image-type picp-current) 'imagemagick)
+    (message "Svg images cannot be scaled")))
 
 
 (defun picp-size-param (pic canvas-size)
