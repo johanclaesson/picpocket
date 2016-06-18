@@ -3,8 +3,8 @@
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2016-06-17 21:51:29 jcl>
-;; Version: 18
+;; Time-stamp: <2016-06-18 13:21:19 jcl>
+;; Version: 19
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -80,7 +80,7 @@
           (picp-db-journal-size 0)
           (picp-inhibit-timers t)
           (picp-demote-warnings t)
-          (picp-dst-dir-is-cwd t)
+          (picp-destination-relative-current t)
           (picp-recursive t)
           (default-directory picp-test-dir))
      (make-directory picp-test-dir t)
