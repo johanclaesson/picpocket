@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2016-06-18 13:21:19 jcl>
-;; Version: 19
+;; Time-stamp: <2016-06-18 15:58:28 jcl>
+;; Version: 20
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -135,15 +135,23 @@
 ;; * Use same default sort order as dired?
 ;; * Worthwhile to delay calculation of picp-bytes to idle timer?
 ;; * Remove all &optional before pic?
-;; * Move and delete commands are not executed immediately.  They are
-;;   stored in an action slot in struct pic.  All actions are executed
-;;   on ### or so.  Maybe the action slot should be a list of
-;;   actions.
-;; ** Optionally do execute the actions eventually.  There is a queue
-;;    of 10 or so actions.
-;; ** Command to view all pending actions.  Preferably with
-;;    thumbnails.
-;; ** Undo command that undoes one pending action at a time.
+;; * Undo
+;; ** List/ring with 25 recent actions
+;; ** Delete moves to /tmp/picpocket-trashcan-XXX
+;; ** u for picp-undo undoes one action an displays the list in
+;;    popup buffer
+;; ** C-u u just displays that buffer
+;; ** Clean up /tmp/picpocket-trashcan-XXX at list overflow and
+;;    emacs exit.
+;; ;; * Move and delete commands are not executed immediately.  They are
+;; ;;   stored in an action slot in struct pic.  All actions are executed
+;; ;;   on ### or so.  Maybe the action slot should be a list of
+;; ;;   actions.
+;; ;; ** Optionally do execute the actions eventually.  There is a queue
+;; ;;    of 10 or so actions.
+;; ;; ** Command to view all pending actions.  Preferably with
+;; ;;    thumbnails.
+;; ;; ** Undo command that undoes one pending action at a time.
 
 ;; NICE
 ;; * Logical operators for filters
@@ -176,7 +184,6 @@
 ;;   (jhash-init :picp picp-test-dir picp-db-format)
 ;;   (defsubst picp-db-put (sha value)
 ;;   (jhash-put :picp sha value))
-;; * defvar -> defcustom where appropriate
 
 
 (eval-when-compile
@@ -194,7 +201,8 @@
   :group 'picpocket)
 
 (defcustom picp-keystroke-alist nil
-  "Symbol with an alist of picpocket keystrokes.
+  "Symbol of variable with an alist of picpocket keystrokes.
+\\<picp-mode-map>
 Elements in the alist have the form (KEY ACTION TARGET).
 
 KEY is a single character, a string accepted by `kbd' or a vector
@@ -218,11 +226,12 @@ Example:
 
 There exist a convenience command `picp-edit-keystrokes' that
 will jump to the definition that the variable
-`picp-keystroke-alist' points to.  It is bound to `e' in the
-picpocket buffer."
-  :risky t)
+`picp-keystroke-alist' points to.  It is bound to
+\\[picp-keystroke-alist] in the picpocket buffer."
+  :risky t
+  :type 'symbol)
 
-(defvar picp-filter-consider-dir-as-tag t
+(defcustom picp-filter-consider-dir-as-tag t
   "Whether filter will consider the directory as a tag.
 
 If non-nil add the containing directory name to the list of tags
@@ -231,7 +240,8 @@ For example the potential extra tag is not shown in the list of
 tags in the header line.
 
 The special value `all' means add all directories in the whole
-path (after all soft links have been resolved).")
+path (after all soft links have been resolved)."
+  :type 'boolean)
 
 (defvar picp-filter-ignore-hyphens t
   "If non-nil the filter ignores underscores and dashes.")
@@ -248,36 +258,74 @@ path (after all soft links have been resolved).")
   "Picture scaling in percent."
   :type 'integer)
 
-(defvar picp-header t)
-(defvar picp-header-line-format '(:eval (picp-header-line))
+(defcustom picp-header t
+  "If non-nil display a header line in picpocket buffer."
+  :type 'boolean)
+
+(defcustom picp-header-line-format '(:eval (picp-header-line))
   "The value for `header-line-format' in picpocket buffers.
 Enabled if `picp-header' is non-nil.")
-(defvar picp-header-full-path nil)
-(defvar picp-look-ahead-max 5)
-(defvar picp-confirm-delete (not noninteractive))
-(defvar picp-tags-style 'list)
-(defvar picp-demote-warnings nil)
-(defvar picp-backdrop-command nil)
-(defvar picp-default-backdrop-commands
-  '(("display" . "-window root")
-    ("feh" . "--bg-file")
-    ("hsetroot" . "-tile")
-    ("xsetbg")))
-(defvar picp-recursive nil)
-(defvar picp-follow-symlinks t
+
+(defcustom picp-header-full-path nil
+  "If non-nil display the whole file path in header line."
+  :type 'boolean)
+
+(defcustom picp-tags-style :list
+  "How a list of tags are displayed."
+  :type '(choice (const :tag "Org style :tag1:tag2:" :org)
+                 (const :list "Lisp list style (tag1 tag2)" :list)))
+
+(defcustom picp-confirm-delete (not noninteractive)
+  "If non-nil let user confirm file delete."
+  :type 'boolean)
+
+(defcustom picp-backdrop-command nil
+  "Command to set desktop backdrop with.
+\\<picp-mode-map>
+Used by `picp-set-backdrop' bound to \\[picp-backdrop-command] in
+picpocket buffer.  If this variable is nil then
+`picp-set-backdrop' will attempt to find an usable command and
+assign it to this variable."
+  :type 'string)
+
+(defcustom picp-recursive nil
+  "If non-nil include sub-directories recursively.
+\\<picp-mode-map>
+This variable can be toggled with the `picp-toggle-recursive'
+command.  It is bound to \\[picp-toggle-recursive] in the
+picpocket buffer."
+  :type 'boolean)
+
+(defcustom picp-follow-symlinks t
   "If non-nil follow symlinks while traversing directories recursively.
+
 Symlinks that points to picture files are always followed.
-This option concerns only symlinks that points to directories.")
-(defvar picp-destination-dir "~/")
-(defvar picp-destination-relative-current t)
-(defvar picp-old-keystroke-alist nil)
+This option concerns only symlinks that points to directories."
+  :type 'boolean)
+
+(defcustom picp-destination-dir "~/"
+  "Destination dir if `picp-destination-relative-current' is nil.
+
+Destination dir is the default target dir for move, copy and
+hardlink commands."
+  :type 'directory)
+
+(defcustom picp-destination-relative-current t
+  "If non-nil the destination dir is the current directory.
+\\<picp-mode-map>
+If nil it is the value of variable `picp-destination-dir'.  This
+variable can be toggled with the command
+`picp-toggle-destination-dir' bound to
+\\[picp-toggle-destination-dir] in the picpocket buffer."
+  :type 'boolean)
 
 
 ;;; Internal variables
 
-(defconst picp-version 19)
+(defconst picp-version 20)
 (defconst picp-buffer "*picpocket*")
 
+(defvar picp-look-ahead-max 5)
 (defvar picp-frame nil)
 (defvar picp-old-frame nil)
 (defvar picp-last-action nil)
@@ -298,9 +346,16 @@ This option concerns only symlinks that points to directories.")
 (defvar picp-filter-match-count nil)
 (defvar picp-window-size nil
   "The current window size in pixels.
-This is kept for the benefit of timer functions that do not
-necessarily run with the picpocket window selected.")
+This is kept for the benefit of the idle timer functions that do
+not necessarily run with the picpocket window selected.")
 (defvar picp-header-text "")
+(defvar picp-demote-warnings nil)
+(defvar picp-old-keystroke-alist nil)
+(defvar picp-default-backdrop-commands
+  '(("display" . "-window root")
+    ("feh" . "--bg-file")
+    ("hsetroot" . "-tile")
+    ("xsetbg")))
 
 ;; Variables displayed in the header-line must be marked as risky.
 (dolist (symbol '(picp-filter
@@ -826,9 +881,10 @@ To use this command you must set variable `picp-keystroke-alist'
 to a variable symbol.  The purpose of this command is to be
 able to quickly move to the definition and edit keystrokes."
   (interactive)
-  (unless picp-keystroke-alist
-    (user-error
-     "You need to set picp-keystroke-alist for this command to work"))
+  (unless (and picp-keystroke-alist
+               (symbolp picp-keystroke-alist))
+    (user-error (concat "You need to set picp-keystroke-alist "
+                        "to a symbol for this command to work")))
   (find-variable-other-window picp-keystroke-alist)
   (goto-char (point-at-eol)))
 
@@ -2514,9 +2570,7 @@ necessarily run with the picpocket window selected."
 
 
 (defun picp-update-keymap ()
-  (cl-loop for (key action arg) in (if (symbolp picp-keystroke-alist)
-                                       (symbol-value picp-keystroke-alist)
-                                     picp-keystroke-alist)
+  (cl-loop for (key action arg) in (picp-keystroke-alist)
            do (define-key picp-mode-map
                 (picp-key-vector key)
                 (cond ((eq action 'tag)
@@ -3007,7 +3061,7 @@ Third invocation will hide the help."
 (defun picp-format-tags (tags)
   (when tags
     (cl-case picp-tags-style
-      (org (format ":%s:" (mapconcat #'symbol-name tags ":")))
+      (:org (format ":%s:" (mapconcat #'symbol-name tags ":")))
       (t (format "(%s)" (mapconcat #'symbol-name tags " "))))))
 
 (defun picp-filter-info ()
