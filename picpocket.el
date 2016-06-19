@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2016-06-19 18:42:23 jcl>
-;; Version: 21
+;; Time-stamp: <2016-06-19 22:14:13 jcl>
+;; Version: 22
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -136,7 +136,7 @@
 
 (require 'cl-lib)
 (require 'dired)
-
+(require 'subr-x)
 
 
 ;;; Options
@@ -266,7 +266,7 @@ variable can be toggled with the command
 
 ;;; Internal variables
 
-(defconst picp-version 21)
+(defconst picp-version 22)
 (defconst picp-buffer "*picpocket*")
 
 (defvar picp-look-ahead-max 5)
@@ -300,6 +300,13 @@ not necessarily run with the picpocket window selected.")
     ("feh" . "--bg-file")
     ("hsetroot" . "-tile")
     ("xsetbg")))
+(defvar picp-tag-completion-table (make-vector 127 0))
+(defvar picp-minibuffer-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map minibuffer-local-map)
+    (define-key map [tab] 'completion-at-point)
+    map)
+  "Keymap used for completing tags in minibuffer.")
 
 ;; Variables displayed in the header-line must be marked as risky.
 (dolist (symbol '(picp-index
@@ -462,6 +469,7 @@ with `cl-multiple-value-bind' etc."
   (when (boundp 'image-scaling-factor)
     (setq-local image-scaling-factor 1.0))
   (picp-db-init)
+  (picp-db-compile-tags-for-completion)
   (setq cursor-type nil
         truncate-lines t
         auto-hscroll-mode nil
@@ -1191,17 +1199,38 @@ instead."
   (interactive "P")
   (if all
       (picp-tag-to-all
-       (read-string "Type tag to add to all files (-tag to remove): "))
-    (let* ((old-tags-string (picp-tags-string-to-edit (picp-tags picp-current)))
-           (new-tags-string (read-string "Tags: " old-tags-string))
-           (new-tag-symbols (mapcar #'intern (split-string new-tags-string))))
+       (picp-read-tags "Type tag to add to all files (-tag to remove): "))
+    (let* ((old-tags-string (picp-tags-string-to-edit (picp-tags)))
+           (new-tags-string (picp-read-tags "Tags: " old-tags-string))
+           (new-tag-symbols (mapcar #'intern
+                                    (split-string new-tags-string))))
       (picp-tags-set picp-current new-tag-symbols)
       (picp-update-buffer)
-      (message "Tags for %s is %s."
-               (picp-file)
+      (message "Tags set to %s."
                (if new-tag-symbols
-                   new-tag-symbols
+                   (picp-format-tags new-tag-symbols)
                  "cleared")))))
+
+(defun picp-read-tags (prompt &optional old-tags-string)
+  (let ((string (minibuffer-with-setup-hook
+                    (lambda ()
+                      (setq-local completion-at-point-functions
+                                  (list #'picp-tag-completion-at-point)))
+                  (read-from-minibuffer prompt
+                                        old-tags-string
+                                        picp-minibuffer-map))))
+    (dolist (tag (split-string string))
+      (intern (string-remove-prefix "-" tag)
+              picp-tag-completion-table))
+    string))
+
+(defun picp-tag-completion-at-point ()
+  (list (save-excursion
+          (skip-chars-backward "^ ")
+          (skip-chars-forward "-")
+          (point))
+        (point)
+        picp-tag-completion-table))
 
 (defun picp-tags-string-to-edit (tags)
   (when tags
@@ -1219,7 +1248,8 @@ concerned.
 
 When called from Lisp the argument FILTER-STRING is a
 space-separated string."
-  (interactive (list (read-string "Show only pictures with this tag: ")))
+  (interactive (list (picp-read-tags
+                      "Show only pictures with these tags: ")))
   (picp-do-set-filter (mapcar #'intern (split-string filter-string)))
   (picp-update-buffer))
 
@@ -1480,6 +1510,8 @@ and PIC is the picture."
 If tag starts with minus remove tag instead of add."
   (cond ((string-match "\\`[:space:]*\\'" tag-string)
          (message "Empty string, no action."))
+        ((not (eq 1 (length (split-string tag-string))))
+         (message "Cannot handle more than one tag at a time"))
         ((eq (elt tag-string 0) ?-)
          (let ((tag (substring tag-string 1)))
            (cl-loop for pic on picp-list
@@ -1775,6 +1807,13 @@ be called."
           (cons :unique-file-missing unique-file-missing)
           (cons :redundant-file-missing redundant-file-missing))))
 
+(defun picp-db-compile-tags-for-completion ()
+  (maphash (lambda (_ plist)
+             (dolist (tag (plist-get plist :tags))
+               (intern (symbol-name tag)
+                       picp-tag-completion-table)))
+           picp-db))
+
 
 
 ;;; Database
@@ -1871,27 +1910,28 @@ be called."
   (make-directory picp-db-dir t)
   (let ((db (picp-db-read nil))
         (old (picp-db-read :old)))
-    (setq picp-db (cond ((and (hash-table-p db) (null old))
-                         db)
-                        ((and (null db) (null old))
-                         (picp-db-new-hash-table))
-                        ((and (not (hash-table-p db)) (hash-table-p old))
-                         (picp-warn "Recovering with picpocket old file")
-                         old)
-                        ((and (hash-table-p db) (hash-table-p old))
-                         (picp-warn "Ignoring spurious picpocket old file (%s)"
-                                    (picp-db-file :old))
-                         (when picp-db-remove-corrupted-files
-                           (delete-file (picp-db-file :old)))
-                         db)
-                        ((and (hash-table-p db) (eq old 'error))
-                         (picp-warn "Ignoring corrupt picpocket old file (%s)"
-                                    (picp-db-file :old))
-                         (when picp-db-remove-corrupted-files
-                           (delete-file (picp-db-file :old)))
-                         db)
-                        (t
-                         (error "Cannot recover picpocket database"))))
+    (setq picp-db
+          (cond ((and (hash-table-p db) (null old))
+                 db)
+                ((and (null db) (null old))
+                 (picp-db-new-hash-table))
+                ((and (not (hash-table-p db)) (hash-table-p old))
+                 (picp-warn "Recovering with picpocket old file")
+                 old)
+                ((and (hash-table-p db) (hash-table-p old))
+                 (picp-warn "Ignoring spurious picpocket old file (%s)"
+                            (picp-db-file :old))
+                 (when picp-db-remove-corrupted-files
+                   (delete-file (picp-db-file :old)))
+                 db)
+                ((and (hash-table-p db) (eq old 'error))
+                 (picp-warn "Ignoring corrupt picpocket old file (%s)"
+                            (picp-db-file :old))
+                 (when picp-db-remove-corrupted-files
+                   (delete-file (picp-db-file :old)))
+                 db)
+                (t
+                 (error "Cannot recover picpocket database"))))
     (when (file-exists-p (picp-db-file :journal))
       (picp-db-read-journal)
       (picp-db-save))))
@@ -2517,6 +2557,7 @@ necessarily run with the picpocket window selected."
            do (define-key picp-mode-map
                 (picp-key-vector key)
                 (cond ((eq action 'tag)
+                       (intern arg picp-tag-completion-table)
                        (picp-tag-command arg))
                       ((memq action '(move copy hardlink))
                        (picp-other-command action arg))
