@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2016-06-19 22:14:13 jcl>
-;; Version: 22
+;; Time-stamp: <2016-06-25 12:55:31 jcl>
+;; Version: 23
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -137,7 +137,7 @@
 (require 'cl-lib)
 (require 'dired)
 (require 'subr-x)
-
+(require 'ring)
 
 ;;; Options
 
@@ -266,7 +266,7 @@ variable can be toggled with the command
 
 ;;; Internal variables
 
-(defconst picp-version 22)
+(defconst picp-version 23)
 (defconst picp-buffer "*picpocket*")
 
 (defvar picp-look-ahead-max 5)
@@ -274,7 +274,6 @@ variable can be toggled with the command
 (defvar picp-old-frame nil)
 (defvar picp-last-action nil)
 (defvar picp-last-arg nil)
-(defvar picp-last-arg-is-dir nil)
 (defvar picp-debug nil)
 (defvar picp-sum 0)
 (defvar picp-picture-regexp nil)
@@ -307,6 +306,45 @@ not necessarily run with the picpocket window selected.")
     (define-key map [tab] 'completion-at-point)
     map)
   "Keymap used for completing tags in minibuffer.")
+
+(defvar picp-undo-ring-size 25)
+(defvar picp-undo-ring (make-ring picp-undo-ring-size))
+
+(cl-defstruct picp-undo
+  command
+  arg
+  operations
+  incomplete)
+
+(cl-defstruct picp-op
+  op
+  ;; if (memq pic picp-list) also restore the pic element
+  pic
+  from-file
+  to-file
+  ;; trashcan-file is also stored for move/copy/hardlink in case of
+  ;; overwrite
+  trashcan-file
+  tag)
+
+(let ((r (make-ring 5)))
+  (ring-insert r 1)
+  (ring-insert r 2)
+  (ring-insert r 3)
+  (list (ring-ref r 0)
+        (ring-remove r)
+        (ring-remove r)
+        r))
+
+;; PENDING clean up /tmp in case of ring overflow...
+;; (ring-insert picp-undo-ring
+;; (make-picp-undo :action action
+;; :arg arg
+;; :arg-is-dir arg-is-dir)))
+
+(defun picp-stash-undo-begin (&rest _args))
+(defun picp-stash-undo-op (&rest _args))
+(defun picp-stash-undo-end ())
 
 ;; Variables displayed in the header-line must be marked as risky.
 (dolist (symbol '(picp-index
@@ -566,6 +604,8 @@ with `cl-multiple-value-bind' etc."
   (define-key map [right] #'scroll-left)
   (define-key map [(control ?b)] #'scroll-right)
   (define-key map [(control ?f)] #'scroll-left)
+  (define-key map [?u] #'picp-undo)
+  (define-key map [(meta ?u)] #'picp-list-undoable-actions)
   (define-key map [?j] #'picp-jump)
   (define-key map [??] #'picp-help)
   (setq picp-mode-map map))
@@ -1035,12 +1075,10 @@ The repeatable actions are:
 1. Move/copy/hardlink the current picture to a directory.
 2. Add a tag to the current picture."
   (interactive)
-  (if picp-last-action
-      (progn
-        (picp-action picp-last-action picp-last-arg picp-last-arg-is-dir)
-        (picp-update-buffer))
-    (user-error "No repeatable action have been done")))
-
+  (unless picp-last-action
+    (user-error "No repeatable action have been done"))
+  (picp-action picp-last-action picp-last-arg)
+  (picp-update-buffer))
 
 (defun picp-dired ()
   "Visit the current directory in `dired-mode'."
@@ -1083,7 +1121,10 @@ When called from Lisp DST is the destination directory."
                                       #'picp-rename))
                        (read-file-name "To: " nil (picp-file) nil
                                        (picp-file)))))
-  (picp-action 'move dst)
+  (picp-action (if (file-directory-p dst)
+                   'move
+                 'rename)
+               dst)
   (picp-update-buffer))
 
 (defun picp-move (all)
@@ -1101,7 +1142,7 @@ With prefix arg (ALL) move all pictures in the current list."
   (let ((pic picp-list))
     (while pic
       (when (picp-filter-match-p pic)
-        (picp-action 'move dst t pic))
+        (picp-action 'move dst pic))
       (setq pic (cdr pic)))
     (message "Moved all to %s." dst)))
 
@@ -1117,7 +1158,7 @@ With prefix arg (ALL) copy all pictures in the current list."
 
 (defun picp-copy-all (dst)
   (picp-mapc (lambda (pic)
-               (picp-action 'copy dst t pic)))
+               (picp-action 'copy dst pic)))
   (message "Copied all to %s." dst))
 
 (defun picp-hardlink (all)
@@ -1132,7 +1173,7 @@ With prefix arg (ALL) hard link all pictures in the current list."
 
 (defun picp-hardlink-all (dst)
   (picp-mapc (lambda (pic)
-               (picp-action 'hardlink dst t pic)))
+               (picp-action 'hardlink dst pic)))
   (message "Hard linked all to %s." dst))
 
 
@@ -1145,7 +1186,7 @@ With prefix arg (ALL) move all pictures in the current list."
   (if all
       (let ((dst (picp-read-key "directory to move all pictures to")))
         (picp-mapc (lambda (pic)
-                     (picp-action 'move dst t pic))))
+                     (picp-action 'move dst pic))))
     (picp-action 'move (picp-read-key "directory to move to")))
   (picp-update-buffer))
 
@@ -1158,7 +1199,7 @@ With prefix arg (ALL) copy all pictures in the current list."
   (if all
       (let ((dst (picp-read-key "directory to copy all pictures to")))
         (picp-mapc (lambda (pic)
-                     (picp-action 'copy dst t pic))))
+                     (picp-action 'copy dst pic))))
     (picp-action 'copy (picp-read-key "directory to copy to"))))
 
 (defun picp-hardlink-by-keystroke (all)
@@ -1170,7 +1211,7 @@ With prefix arg (ALL) hard link all pictures in the current list."
   (if all
       (let ((dst (picp-read-key "directory to link all pictures to")))
         (picp-mapc (lambda (pic)
-                     (picp-action 'hardlink dst t pic))))
+                     (picp-action 'hardlink dst pic))))
     (picp-action 'hardlink (picp-read-key "directory to link to"))))
 
 
@@ -1202,14 +1243,14 @@ instead."
        (picp-read-tags "Type tag to add to all files (-tag to remove): "))
     (let* ((old-tags-string (picp-tags-string-to-edit (picp-tags)))
            (new-tags-string (picp-read-tags "Tags: " old-tags-string))
-           (new-tag-symbols (mapcar #'intern
-                                    (split-string new-tags-string))))
+           (new-tag-symbols (cl-delete-duplicates
+                             (mapcar #'intern
+                                     (split-string new-tags-string)))))
       (picp-tags-set picp-current new-tag-symbols)
       (picp-update-buffer)
-      (message "Tags set to %s."
-               (if new-tag-symbols
-                   (picp-format-tags new-tag-symbols)
-                 "cleared")))))
+      (if new-tag-symbols
+          (message "Tags set to %s." (picp-format-tags new-tag-symbols))
+        (message "Tags cleared")))))
 
 (defun picp-read-tags (prompt &optional old-tags-string)
   (let ((string (minibuffer-with-setup-hook
@@ -1425,8 +1466,7 @@ space-separated string."
                  for file = (file-name-nondirectory path)
                  if (file-exists-p path)
                  collect (make-picp-pic :dir dir
-                                        :file file
-                                        :bytes (picp-file-bytes path))
+                                        :file file)
                  else do (message "%s do not exist" path)))
   (cl-loop for pic on picp-list
            with prev = nil
@@ -1454,11 +1494,11 @@ space-separated string."
 ;; database below.
 
 (defun picp-tags (&optional pic)
-  (picp-db-tags (picp-sha-via-cache pic)))
+  (picp-db-tags (picp-sha-force pic)))
 
 (defun picp-tags-set (pic new-tags)
   (let ((match-before (picp-filter-match-p pic)))
-    (picp-db-tags-set (picp-sha-via-cache pic)
+    (picp-db-tags-set (picp-sha-force pic)
                       (picp-path pic)
                       new-tags)
     (let ((match-after (picp-filter-match-p pic)))
@@ -1475,13 +1515,13 @@ space-separated string."
 
 
 (defun picp-tags-move-file (pic old-file new-file)
-  (picp-db-tags-move-file (picp-sha-via-cache pic) old-file new-file))
+  (picp-db-tags-move-file (picp-sha-force pic) old-file new-file))
 
 (defun picp-tags-copy-file (pic new-file)
-  (picp-db-tags-copy-file (picp-sha-via-cache pic) new-file))
+  (picp-db-tags-copy-file (picp-sha-force pic) new-file))
 
 (defun picp-tags-delete-file (pic deleted-file)
-  (picp-db-tags-delete-file (picp-sha-via-cache pic) deleted-file))
+  (picp-db-tags-delete-file (picp-sha-force pic) deleted-file))
 
 (defun picp-add-tag (tag-string &optional pic)
   "Add a tag to current picture or the picture given as argument.
@@ -1492,7 +1532,11 @@ and PIC the picture."
          (tags (picp-tags pic))
          (inhibit-quit t))
     (unless (memq tag tags)
-      (picp-tags-set pic (cons tag tags)))))
+      (picp-tags-set pic (cons tag tags))
+      (picp-stash-undo-op :op 'add-tag
+                          :pic pic
+                          :to-file (picp-path pic)
+                          :tag tag))))
 
 (defun picp-remove-tag (tag-string &optional pic)
   "Remove a tag from current picture or the picture given as argument.
@@ -1523,7 +1567,7 @@ If tag starts with minus remove tag instead of add."
          (message "All tagged with %s." tag-string))))
 
 
-(defun picp-sha-via-cache (pic)
+(defun picp-sha-force (pic)
   "Return the sha1 checksum of PIC.
 The checksum will be computed if not already available.
 Also, if there is a matching entry in the database with tags
@@ -1780,7 +1824,11 @@ be called."
 
 (defun picp-db-traverse ()
   (picp-db-init)
-  (let (sha-changed
+  (let ((progress (make-progress-reporter "Traversing database "
+                                          0
+                                          (hash-table-count picp-db)))
+        (i 0)
+        sha-changed
         unique-file-missing
         redundant-file-missing)
     (maphash (lambda (sha plist)
@@ -1801,8 +1849,11 @@ be called."
                                      redundant-file-missing))
                      (setq unique-file-missing
                            (append missing-files
-                                   unique-file-missing))))))
+                                   unique-file-missing))))
+                 (cl-incf i)
+                 (progress-reporter-update progress i)))
              picp-db)
+    (progress-reporter-done progress)
     (list (cons :sha-changed sha-changed)
           (cons :unique-file-missing unique-file-missing)
           (cons :redundant-file-missing redundant-file-missing))))
@@ -2068,7 +2119,8 @@ be called."
 
 (defvar picp-timers nil)
 (defvar picp-idle-timer-work-functions
-  '((picp-maybe-save-journal 0.2)
+  '((picp-update-current-bytes 0.1)
+    (picp-maybe-save-journal 0.2)
     (picp-look-ahead-next 0.2)
     ;; PENDING
     ;; (picp-look-ahead-more 2)
@@ -2152,14 +2204,17 @@ be called."
 (defun picp-travserse-pic-list (deadline-function state)
   (with-current-buffer picp-buffer
     (cl-loop for pic on (picp-continue-or-start-over state)
-             do (progn
-                  (picp-sha-via-cache pic)
-                  (picp-size-via-cache pic))
+             do (picp-ensure-cache pic)
              until (funcall deadline-function pic))
-    ;; picp-size-via-cache may push out the very next pic from the
+    ;; picp-size-force may push out the very next pic from the
     ;; emacs image cache.  Call picp-look-ahead-next to put it back if
     ;; needed.
     (picp-look-ahead-next)))
+
+(defun picp-ensure-cache (pic)
+  (picp-sha-force pic)
+  (picp-size-force pic)
+  (picp-bytes-force pic))
 
 (defun picp-continue-or-start-over (state)
   "Continue from saved STATE or start from scratch if STATE is invalid.
@@ -2201,6 +2256,11 @@ considered invalid and we start from the beginning again."
                until (funcall deadline-function pos)))))
 
 
+(defun picp-update-current-bytes (&rest ignored)
+  (let ((bytes (picp-bytes)))
+    (picp-bytes-force picp-current)
+    (unless bytes
+      (force-mode-line-update))))
 
 (defun picp-maybe-save-journal (&rest ignored)
   (when (> (picp-db-journal-size) 100)
@@ -2357,7 +2417,7 @@ necessarily run with the picpocket window selected."
 (defun picp-size-param (pic canvas-size)
   (pcase-let ((canvas-ratio (picp-cons-ratio canvas-size))
               (rot-ratio (picp-cons-ratio (picp-rotated-size pic)))
-              (`(,pic-x . ,_) (picp-size-via-cache pic)))
+              (`(,pic-x . ,_) (picp-size-force pic)))
     (pcase picp-fit
       (:x-and-y (if (> canvas-ratio rot-ratio)
                     (picp-height-size-param pic canvas-size)
@@ -2368,19 +2428,19 @@ necessarily run with the picpocket window selected."
 
 (defun picp-height-size-param (pic canvas-size)
   (pcase-let* ((`(,_ . ,canvas-y) canvas-size)
-               (`(,_ . ,pic-y) (picp-size-via-cache pic))
+               (`(,_ . ,pic-y) (picp-size-force pic))
                (`(,_ . ,rot-y) (picp-rotated-size pic))
                (y-ratio (picp-ratio pic-y rot-y)))
     (cons :height (round (* y-ratio canvas-y)))))
 
 (defun picp-width-size-param (pic canvas-size)
   (pcase-let* ((`(,canvas-x . ,_) canvas-size)
-               (`(,pic-x . ,_) (picp-size-via-cache pic))
+               (`(,pic-x . ,_) (picp-size-force pic))
                (`(,rot-x . ,_) (picp-rotated-size pic))
                (x-ratio (picp-ratio pic-x rot-x)))
     (cons :width (round (* x-ratio canvas-x)))))
 
-(defun picp-size-via-cache (pic)
+(defun picp-size-force (pic)
   (or (picp-size pic)
       (picp-save-size-in-pic pic)))
 
@@ -2394,7 +2454,7 @@ necessarily run with the picpocket window selected."
 (defun picp-rotated-size (pic)
   (if (or (zerop (picp-rotation pic))
           (not (eq 'imagemagick (picp-image-type pic))))
-      (picp-size-via-cache pic)
+      (picp-size-force pic)
     (image-size (create-image (picp-path pic)
                               (picp-image-type pic)
                               nil
@@ -2413,6 +2473,7 @@ necessarily run with the picpocket window selected."
     (picp-debug s "look")))
 
 (defun picp-look-ahead (pic)
+  (picp-ensure-cache pic)
   (image-size (picp-create-image pic picp-window-size)
               t
               (if (picp-fullscreen-p)
@@ -2560,9 +2621,8 @@ necessarily run with the picpocket window selected."
                        (intern arg picp-tag-completion-table)
                        (picp-tag-command arg))
                       ((memq action '(move copy hardlink))
-                       (picp-other-command action arg))
-                      ((and (symbolp action)
-                            (fboundp action))
+                       (picp-file-command action arg))
+                      ((symbolp action)
                        action)
                       (t
                        (error "Invalid entry in picp-keystroke-alist (%s %s %s)"
@@ -2593,7 +2653,7 @@ necessarily run with the picpocket window selected."
     (put symbol 'picp-user-command 'tag)
     symbol))
 
-(defun picp-other-command (action dst)
+(defun picp-file-command (action dst)
   "Create a command that move/copy/hardlink the current picture.
 ACTION is one of the symbols move, copy or hardlink.
 DST is the destination directory."
@@ -2601,7 +2661,7 @@ DST is the destination directory."
     (fset symbol `(lambda ()
                     ,(picp-command-doc action dst)
                     (interactive)
-                    (picp-action ',action ,dst t)
+                    (picp-action ',action ,dst)
                     ,(when (eq action 'move)
                        '(picp-update-buffer))))
     (put symbol 'picp-user-command 'other)
@@ -2729,10 +2789,7 @@ Third invocation will hide the help."
   (insert-text-button "picp-repeat"
                       'type 'help-function
                       'help-args (list 'picp-repeat))
-  (princ (format " (%s %s%s)"
-                 picp-last-action
-                 picp-last-arg
-                 (if picp-last-arg-is-dir "/" ""))))
+  (princ (format " (%s %s)" picp-last-action picp-last-arg)))
 
 
 (defun picp-help-user-commands ()
@@ -2766,34 +2823,47 @@ Third invocation will hide the help."
 
 ;;; File managemet and tag command help functions.
 
-(defun picp-action (action arg &optional dst-is-dir pic)
+
+;; All undoable actions should go through here.
+(defun picp-action (action arg &optional pic)
+  (picp-stash-undo-begin :command action
+                         :arg arg)
   (if (eq action 'tag)
       (progn
         (picp-add-tag arg pic)
         (message "%s is tagged with %s." (picp-file pic) arg)
-        (force-mode-line-update)
-        (picp-save-last-action action arg dst-is-dir))
-    (let ((old-dir (picp-dir pic))
-          (new-path (picp-new-path-for-file-action arg dst-is-dir pic)))
-      (picp-file-action action new-path pic)
-      (unless (string-equal (file-name-nondirectory new-path) old-dir)
-        (picp-save-last-action action arg dst-is-dir)))))
+        (force-mode-line-update))
+    (picp-file-action action
+                      (picp-new-path-for-file-action action arg pic)
+                      pic))
+  (unless (eq action 'rename)
+    (picp-save-last-action action arg))
+  (picp-stash-undo-end))
 
-(defun picp-save-last-action (action arg arg-is-dir)
+(defun picp-action-string (action)
+  (cl-case action
+    (copy "copy")
+    (move "move")
+    (rename "rename")
+    (hardlink "hard link")))
+
+
+;; (cl-defmethod picp-do-action ((_action (eql tag)) tag pic))
+;; (cl-defmethod picp-undo-action ((_action (eql tag)) tag pic))
+
+(defun picp-new-path-for-file-action (action dst pic)
+  (file-truename
+   (if (eq action 'rename)
+       dst
+     (expand-file-name (picp-file pic)
+                       (if (or (file-name-absolute-p dst)
+                               picp-destination-relative-current)
+                           dst
+                         (expand-file-name dst picp-destination-dir))))))
+
+(defun picp-save-last-action (action arg)
   (setq picp-last-action action
-        picp-last-arg arg
-        picp-last-arg-is-dir arg-is-dir))
-
-(defun picp-new-path-for-file-action (dst dst-is-dir pic)
-  (unless (or (file-name-absolute-p dst)
-              picp-destination-relative-current)
-    (setq dst (concat picp-destination-dir dst)))
-  (file-truename (if (or dst-is-dir
-                         (file-directory-p dst))
-                     (concat (file-name-as-directory dst)
-                             (picp-file pic))
-                   dst)))
-
+        picp-last-arg arg))
 
 (defun picp-file-action (action new-path pic)
   (let* ((pic (or pic picp-current))
@@ -2814,7 +2884,7 @@ Third invocation will hide the help."
              (setq ok-if-already-exists
                    (y-or-n-p (concat "Identical file already exists in "
                                      new-dir
-                                     "  Overwrite? "))
+                                     ".  Overwrite? "))
                    identical t))
             ((file-directory-p new-path)
              (setq new-file
@@ -2824,32 +2894,17 @@ Third invocation will hide the help."
                     old-file))
              (setq new-path (concat new-dir new-file)))
             (t
-             (unwind-protect
-                 (let (picp-adapt-to-window-size-change)
-                   (picp-compare pic new-path)
-                   (setq new-file
-                         (read-string
-                          (format (concat "File already exists (size %s)."
-                                          "  Rename this (size %s) to: ")
-                                  (picp-file-kb new-path)
-                                  (picp-file-kb old-path))
-                          old-file))
-                   (setq new-path (concat new-dir new-file)))
-               (picp-update-buffer)))))
-    (cl-case action
-      (move
-       (picp--move old-path new-path ok-if-already-exists pic))
-      ((copy hardlink)
+             (setq new-file (picp-compare pic new-path)
+                   new-path (concat new-dir new-file)))))
+    (pcase action
+      ((or `move `rename)
+       (picp--move action old-path new-path ok-if-already-exists pic))
+      ((or `copy `hardlink)
        (picp--duplicate action old-path new-path ok-if-already-exists))
-      (t (error "Invalid picpocket action %s" action)))))
+      (_ (error "Invalid picpocket action %s" action)))))
 
-(defun picp-action-string (action)
-  (cl-case action
-    (copy "copy")
-    (move "rename")
-    (hardlink "hard link")))
 
-(defun picp--move (old-path new-path ok-if-already-exists pic)
+(defun picp--move (action old-path new-path ok-if-already-exists pic)
   (let ((new-dir (file-name-directory new-path))
         (new-file (file-name-nondirectory new-path))
         (old-dir (file-name-directory old-path))
@@ -2857,12 +2912,19 @@ Third invocation will hide the help."
         (inhibit-quit t))
     (rename-file old-path new-path ok-if-already-exists)
     (picp-tags-move-file pic old-path new-path)
-    (if (equal old-dir new-dir)
-        (progn
-          (picp-set-file pic new-file)
-          (message "Renamed %s to %s." old-file new-file))
-      (picp-delete-pic pic)
-      (message "Moved %s to %s." old-file new-dir))))
+    (cond ((or (eq action 'move)
+               (equal old-file new-file))
+           (picp-delete-pic pic)
+           (message "Moved %s to %s."
+                    (file-name-nondirectory old-path)
+                    (file-name-directory new-path)))
+          ((equal old-dir new-dir)
+           (picp-set-file pic new-file)
+           (message "Renamed %s to %s." old-file new-file))
+          (t
+           (picp-delete-pic pic)
+           (message "Renamed and moved %s to %s." old-file new-path)))))
+
 
 (defun picp--duplicate (action old-path new-path ok-if-already-exists)
   (let ((old-file (file-name-nondirectory old-path))
@@ -2881,8 +2943,19 @@ Third invocation will hide the help."
            old
            dst))
 
+(defun picp-compare (pic new-path)
+  (unwind-protect
+      (let (picp-adapt-to-window-size-change)
+        (picp-show-two-pictures pic new-path)
+        (read-string
+         (format (concat "File already exists (size %s)."
+                         "  Rename this (size %s) to: ")
+                 (picp-kb (picp-file-bytes new-path))
+                 (picp-kb (picp-bytes-force pic)))
+         (picp-file pic)))
+    (picp-update-buffer)))
 
-(defun picp-compare (pic new)
+(defun picp-show-two-pictures (pic new)
   (cl-destructuring-bind (window-width . window-height)
       (picp-save-window-size)
     (let* ((line-height (+ (frame-char-height)
@@ -2895,10 +2968,11 @@ Third invocation will hide the help."
            buffer-read-only)
       (erase-buffer)
       (insert (format "About to overwrite this picture (%s):\n"
-                      (picp-file-kb new)))
+                      (picp-kb (picp-file-bytes new))))
       (insert-image (picp-create-image (picp-make-pic new)
                                        (cons window-width pic-height)))
-      (insert (format "\nWith this picture (%s):\n" (picp-pic-kb pic)))
+      (insert (format "\nWith this picture (%s):\n"
+                      (picp-kb (picp-bytes-force pic))))
       (insert-image (picp-create-image pic (cons window-width pic-height)))
       (goto-char (point-min)))))
 
@@ -2988,7 +3062,7 @@ Third invocation will hide the help."
                                    'face 'highlight))
                (when picp-debug
                  picp-header-text)
-               (picp-pic-kb picp-current)
+               (picp-maybe-kb)
                (picp-scale-info)
                (picp-rotation-info)
                (picp-format-tags (picp-tags picp-current))
@@ -3016,11 +3090,19 @@ Third invocation will hide the help."
         (abbreviate-file-name (directory-file-name (picp-dir))))
     (file-name-nondirectory (directory-file-name (picp-dir)))))
 
-(defun picp-pic-kb (pic)
-  (picp-kb (picp-bytes pic)))
+(defun picp-maybe-kb ()
+  (let ((bytes (picp-bytes picp-current)))
+    (if bytes
+        (picp-kb bytes)
+      "")))
 
-(defun picp-file-kb (file)
-  (picp-kb (picp-file-bytes file)))
+
+(defun picp-bytes-force (pic)
+  (or (picp-bytes pic)
+      (picp-save-bytes-in-pic pic)))
+
+(defun picp-save-bytes-in-pic (pic)
+  (picp-set-bytes pic (picp-file-bytes (picp-path pic))))
 
 (defun picp-file-bytes (file)
   (unless (file-exists-p file)

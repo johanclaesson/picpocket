@@ -3,8 +3,8 @@
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2016-06-19 22:14:13 jcl>
-;; Version: 22
+;; Time-stamp: <2016-06-25 12:55:31 jcl>
+;; Version: 23
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -659,7 +659,7 @@ warm/red.svg"
     (copy-file "blue.svg" "green.svg" t)
     (picp-add-tag "troll")
     (cl-loop for pic on picp-list
-             do (picp-sha-via-cache pic))
+             do (picp-sha-force pic))
     (picp-db-dump)
     (should (eq 1 (picp-db-count)))
     (delete-file "blue.svg")
