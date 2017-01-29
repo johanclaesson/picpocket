@@ -15,12 +15,13 @@ Main entry point
 ----------------
 
 Command: picpocket
+
  View the pictures in the current directory.
 
 Main keybindings
 ----------------
 
-Space     - Next picture
+>Space     - Next picture
 BackSpace - Previous picture
 r         - Rename picture file
 c         - Copy picture file
@@ -47,7 +48,7 @@ Picpocket will secretly do stuff in the background with idle
 timers.  This includes to load upcoming pictures into the image
 cache.  The intention is that they should block Emacs for so short
 periods that it is not noticable.  But if you want to get rid of
-them set `picp-inhibit-timers' or kill the picpocket buffer.
+them set `\`picp-inhibit-timers'` or kill the picpocket buffer.
 
 Picpocket is to be considered beta software.  Keybindings,
 variables and such may change in future versions.  Tag database
@@ -63,7 +64,7 @@ commands to move picture files to directories according to genre.
 Finally creates also one command to copy pictures to a backup
 directory in the user's home directory.
 
-(defvar my-picp-alist
+>(defvar my-picp-alist
   '((?1 tag "bad")
     (?2 tag "sigh")
     (?3 tag "good")
@@ -81,12 +82,12 @@ directory in the user's home directory.
 Digits and capital letters with no modifiers is reserved for these
 kind of user keybindings.
 
-It is recommended to set `picp-keystroke-alist' to a symbol as
-above.  That makes the command `picp-edit-keystrokes' (bound to `e'
+It is recommended to set `\`picp-keystroke-alist'` to a symbol as
+above.  That makes the command `\`picp-edit-keystrokes'` (bound to `\`e'`
 in picpocket buffer) jump to your definition for quick changes.
 Edit the list and type M-C-x to save it.
 
-See the doc of `picp-keystroke-alist' for about the same thing but
+See the doc of `\`picp-keystroke-alist'` for about the same thing but
 with a few more details.
 
 Tag database
