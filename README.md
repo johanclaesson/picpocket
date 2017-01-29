@@ -83,7 +83,7 @@ Digits and capital letters with no modifiers is reserved for these
 kind of user keybindings.
 
 It is recommended to set picp-keystroke-alist to a symbol as
-above.  That makes the command picp-edit-keystrokes (bound to e
+above.  That makes the command picp-edit-keystrokes' (bound to `e
 in picpocket buffer) jump to your definition for quick changes.
 Edit the list and type M-C-x to save it.
 
@@ -104,7 +104,7 @@ change.  For example this would happen if you rotate or crop the
 picture with an external program.  That will break the association
 between sha1 checksum and tags.  However picpocket also stores the
 file name for each entry of tags.  The command
-`picpocket-db-update' will go through the database and offer to
+picpocket-db-update will go through the database and offer to
 recover such lost associations.
 
 If you change the file-name and the file content at the same time
