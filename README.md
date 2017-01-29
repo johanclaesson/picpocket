@@ -21,22 +21,22 @@ Command: picpocket
 Main keybindings
 ----------------
 
->Space     - Next picture
-BackSpace - Previous picture
-r         - Rename picture file
-c         - Copy picture file
-k         - Delete picture file
-t         - Edit tags
-s         - Slide-show mode
-[         - Rotate counter-clockwise
-]         - Rotate clockwise
-+         - Scale in
--         - Scale out
-u         - Undo
-M-u       - View history of undoable actions
-e         - Customize keystrokes (see below)
-TAB f     - Toggle full-screen
-TAB r     - Toggle recursive inclusion of pictures in sub-directories
+    Space     - Next picture
+    BackSpace - Previous picture
+    r         - Rename picture file
+    c         - Copy picture file
+    k         - Delete picture file
+    t         - Edit tags
+    s         - Slide-show mode
+    [         - Rotate counter-clockwise
+    ]         - Rotate clockwise
+    +         - Scale in
+    -         - Scale out
+    u         - Undo
+    M-u       - View history of undoable actions
+    e         - Customize keystrokes (see below)
+    TAB f     - Toggle full-screen
+    TAB r     - Toggle recursive inclusion of pictures in sub-directories
 
 With prefix argument many of the commands will operatate on all the
 pictures in the current list instead of just the current picture.
@@ -48,7 +48,7 @@ Picpocket will secretly do stuff in the background with idle
 timers.  This includes to load upcoming pictures into the image
 cache.  The intention is that they should block Emacs for so short
 periods that it is not noticable.  But if you want to get rid of
-them set `\`picp-inhibit-timers'` or kill the picpocket buffer.
+them set picp-inhibit-timers or kill the picpocket buffer.
 
 Picpocket is to be considered beta software.  Keybindings,
 variables and such may change in future versions.  Tag database
@@ -64,30 +64,30 @@ commands to move picture files to directories according to genre.
 Finally creates also one command to copy pictures to a backup
 directory in the user's home directory.
 
->(defvar my-picp-alist
-  '((?1 tag "bad")
-    (?2 tag "sigh")
-    (?3 tag "good")
-    (?4 tag "great")
-    (?5 tag "awesome")
-    (?F move "fantasy")
-    (?S move "scifi")
-    (?P move "steampunk")
-    (?H move "horror")
-    (?U move "urban-fantasy")
-    (?B copy "~/backup")))
+    (defvar my-picp-alist
+      '((?1 tag "bad")
+        (?2 tag "sigh")
+        (?3 tag "good")
+        (?4 tag "great")
+        (?5 tag "awesome")
+        (?F move "fantasy")
+        (?S move "scifi")
+        (?P move "steampunk")
+        (?H move "horror")
+        (?U move "urban-fantasy")
+        (?B copy "~/backup")))
 
-(setq picp-keystroke-alist 'my-picp-alist)
+    (setq picp-keystroke-alist 'my-picp-alist)
 
 Digits and capital letters with no modifiers is reserved for these
 kind of user keybindings.
 
-It is recommended to set `\`picp-keystroke-alist'` to a symbol as
-above.  That makes the command `\`picp-edit-keystrokes'` (bound to `\`e'`
+It is recommended to set picp-keystroke-alist to a symbol as
+above.  That makes the command picp-edit-keystrokes (bound to e
 in picpocket buffer) jump to your definition for quick changes.
 Edit the list and type M-C-x to save it.
 
-See the doc of `\`picp-keystroke-alist'` for about the same thing but
+See the doc of picp-keystroke-alist for about the same thing but
 with a few more details.
 
 Tag database
