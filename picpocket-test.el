@@ -3,8 +3,8 @@
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2016-09-04 19:04:34 jcl>
-;; Version: 25
+;; Time-stamp: <2017-01-29 17:24:26 jcl>
+;; Version: 26
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -66,8 +66,8 @@
 
 (defun picp-add-tag-manga ())
 (defun picp-add-tag-horror ())
-(defvar picp-test-keystroke-alist '((?M tag "manga")
-                                    (?H tag "horror")))
+(defvar picp-test-keystroke-alist '((?M add-tag "manga")
+                                    (?H add-tag "horror")))
 
 
 ;;; Macros
@@ -709,7 +709,7 @@ warm/red.svg"
 
 (ert-deftest picp-external-file-sha-change ()
   (picp-with-test-buffer
-    (picp-tag "dragon")
+    (picp-add-tag "dragon")
     (append-to-file " " nil "blue.svg")
     (let ((sha-changed (cdr (assq :sha-changed (picp-db-traverse))))
           (sha (picp-sha1sum "blue.svg")))
@@ -721,7 +721,7 @@ warm/red.svg"
 
 (ert-deftest picp-delete-unique-tagged-file ()
   (picp-with-test-buffer
-    (picp-tag "troll")
+    (picp-add-tag "troll")
     (delete-file "blue.svg")
     (let ((unique-file-missing (cdr (assq :unique-file-missing
                                           (picp-db-traverse)))))
@@ -729,14 +729,14 @@ warm/red.svg"
       (picp-remove-file-names-in-db unique-file-missing)
       (should (zerop (picp-db-count))))))
 
-(defun picp-tag (tag-string)
+(defun picp-add-tag (tag-string)
   (picp-command
-    (picp-action 'tag tag-string)))
+    (picp-action 'add-tag tag-string)))
 
 (ert-deftest picp-delete-redundant-tagged-file ()
   (picp-with-test-buffer
     (copy-file "blue.svg" "green.svg" t)
-    (picp-tag "troll")
+    (picp-add-tag "troll")
     (cl-loop for pic on picp-list
              do (picp-sha-force pic))
     (picp-db-dump)
@@ -987,4 +987,3 @@ warm/red.svg"
 (provide 'picpocket-test)
 
 ;;; picpocket-test.el ends here
-
