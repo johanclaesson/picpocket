@@ -48,7 +48,7 @@ Picpocket will secretly do stuff in the background with idle
 timers.  This includes to load upcoming pictures into the image
 cache.  The intention is that they should block Emacs for so short
 periods that it is not noticable.  But if you want to get rid of
-them set picp-inhibit-timers or kill the picpocket buffer.
+them set `picp-inhibit-timers` or kill the picpocket buffer.
 
 Picpocket is to be considered beta software.  Keybindings,
 variables and such may change in future versions.  Tag database
@@ -82,12 +82,12 @@ directory in the user's home directory.
 Digits and capital letters with no modifiers is reserved for these
 kind of user keybindings.
 
-It is recommended to set picp-keystroke-alist to a symbol as
-above.  That makes the command picp-edit-keystrokes' (bound to `e
+It is recommended to set `picp-keystroke-alist` to a symbol as
+above.  That makes the command `picp-edit-keystrokes` (bound to `e`
 in picpocket buffer) jump to your definition for quick changes.
 Edit the list and type M-C-x to save it.
 
-See the doc of picp-keystroke-alist for about the same thing but
+See the doc of `picp-keystroke-alist` for about the same thing but
 with a few more details.
 
 Tag database
@@ -104,7 +104,7 @@ change.  For example this would happen if you rotate or crop the
 picture with an external program.  That will break the association
 between sha1 checksum and tags.  However picpocket also stores the
 file name for each entry of tags.  The command
-picpocket-db-update will go through the database and offer to
+`picpocket-db-update` will go through the database and offer to
 recover such lost associations.
 
 If you change the file-name and the file content at the same time
