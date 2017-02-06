@@ -3,8 +3,8 @@
 ;; Copyright (C) 2013 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Created:    <2013-03-03>
-;; Time-stamp: <2017-01-29 17:24:26 jcl>
-;; Version: 26
+;; Time-stamp: <2017-02-06 11:02:52 jcl>
+;; Version: 27
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by

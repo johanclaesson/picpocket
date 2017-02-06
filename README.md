@@ -9,14 +9,16 @@ compiled with ImageMagick.  It has commands for:
 * Associate pictures with tags which are saved to disk.
 * Filter pictures according to tags.
 * Customizing keystrokes for quick tagging and file operations.
-* Undo command and browse undo history.
+* Undo and browse history of undoable commands.
+
 
 Main entry point
 ----------------
 
 Command: picpocket
 
- View the pictures in the current directory.
+View the pictures in the current directory.
+
 
 Main keybindings
 ----------------
@@ -41,6 +43,7 @@ Main keybindings
 With prefix argument many of the commands will operatate on all the
 pictures in the current list instead of just the current picture.
 
+
 Disclaimer
 ----------
 
@@ -53,6 +56,7 @@ them set `picp-inhibit-timers` or kill the picpocket buffer.
 Picpocket is to be considered beta software.  Keybindings,
 variables and such may change in future versions.  Tag database
 file format will remain backwards compatible though.
+
 
 Keystroke customization
 -----------------------
@@ -89,6 +93,7 @@ Edit the list and type M-C-x to save it.
 
 See the doc of `picp-keystroke-alist` for about the same thing but
 with a few more details.
+
 
 Tag database
 ------------

@@ -4,8 +4,8 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; Created: 2015-02-16
-;; Time-stamp: <2017-01-29 17:24:26 jcl>
-;; Version: 26
+;; Time-stamp: <2017-02-06 11:02:52 jcl>
+;; Version: 27
 ;; Keywords: multimedia
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -31,13 +31,16 @@
 ;; * Associate pictures with tags which are saved to disk.
 ;; * Filter pictures according to tags.
 ;; * Customizing keystrokes for quick tagging and file operations.
-;; * Undo command and browse undo history.
+;; * Undo and browse history of undoable commands.
+;;
 ;;
 ;; Main entry point
 ;; ----------------
 ;;
 ;; Command: picpocket
-;;  View the pictures in the current directory.
+;;
+;; View the pictures in the current directory.
+;;
 ;;
 ;; Main keybindings
 ;; ----------------
@@ -62,6 +65,7 @@
 ;; With prefix argument many of the commands will operatate on all the
 ;; pictures in the current list instead of just the current picture.
 ;;
+;;
 ;; Disclaimer
 ;; ----------
 ;;
@@ -74,6 +78,7 @@
 ;; Picpocket is to be considered beta software.  Keybindings,
 ;; variables and such may change in future versions.  Tag database
 ;; file format will remain backwards compatible though.
+;;
 ;;
 ;; Keystroke customization
 ;; -----------------------
@@ -110,6 +115,7 @@
 ;;
 ;; See the doc of `picp-keystroke-alist' for about the same thing but
 ;; with a few more details.
+
 ;;
 ;; Tag database
 ;; ------------
@@ -275,7 +281,7 @@ Specified in number of default line heigths."
 
 ;;; Internal variables
 
-(defconst picp-version 26)
+(defconst picp-version 27)
 (defconst picp-buffer "*picpocket*")
 (defconst picp-undo-buffer "*picpocket-undo*")
 
@@ -2959,7 +2965,7 @@ DST is the destination directory."
 
 (defun picp-command-name (action arg)
   (pcase action
-    (`add-tag (concat "picp-add-tag-" arg))
+    ((or `add-tag `tag) (concat "picp-add-tag-" arg))
     (`move (concat "picp-move-to-" arg))
     (`copy (concat "picp-copy-to-" arg))
     (`hardlink (concat "picp-hardlink-to-" arg))
