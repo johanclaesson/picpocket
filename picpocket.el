@@ -1,12 +1,11 @@
 ;;; picpocket.el --- Image viewer -*- lexical-binding: t; coding: utf-8-unix -*-
 
-;; Copyright (C) 2015 Johan Claesson
+;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
-;; Created: 2015-02-16
-;; Time-stamp: <2017-02-06 11:02:52 jcl>
-;; Version: 27
+;; Version: 28
 ;; Keywords: multimedia
+;; Package-Requires: ((emacs "24.4"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -281,7 +280,7 @@ Specified in number of default line heigths."
 
 ;;; Internal variables
 
-(defconst picp-version 27)
+(defconst picp-version 28)
 (defconst picp-buffer "*picpocket*")
 (defconst picp-undo-buffer "*picpocket-undo*")
 
@@ -559,6 +558,19 @@ This mode is not used directly.  Other modes inherit from this mode."
   (add-hook 'buffer-list-update-hook #'picp-maybe-rescale)
   (picp-init-timers)
   (picp-update-keymap))
+
+(defun picpocket-unload-function ()
+  (message "Unloading picpocket")
+  (picp-cancel-timers)
+  (picp-delete-trashcan)
+  (remove-hook 'kill-emacs-hook #'picp-delete-trashcan)
+  (remove-hook 'window-size-change-functions #'picp-window-size-change-function)
+  (remove-hook 'buffer-list-update-hook #'picp-maybe-update-keymap)
+  (remove-hook 'buffer-list-update-hook #'picp-maybe-rescale)
+  (remove-hook 'focus-in-hook #'picp-focus)
+  (remove-hook 'minibuffer-setup-hook #'picp-minibuffer-setup)
+  (remove-hook 'minibuffer-exit-hook #'picp-minibuffer-exit)
+  nil)
 
 (let ((map (make-sparse-keymap))
       (toggle-map (make-sparse-keymap

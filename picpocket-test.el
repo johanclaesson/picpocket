@@ -1,10 +1,11 @@
-;;; picpocket-test.el -*- lexical-binding: t; coding: utf-8-unix -*-
+;;; picpocket-test.el --- Tests -*- lexical-binding: t; coding: utf-8-unix -*-
 
-;; Copyright (C) 2013 Johan Claesson
+;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
-;; Created:    <2013-03-03>
-;; Time-stamp: <2017-02-06 11:02:52 jcl>
-;; Version: 27
+;; Version: 28
+;; Keywords: multimedia
+;; Package-Requires: ((emacs "24.4"))
+
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
