@@ -1,8 +1,8 @@
 #Picpocket
 
 
-Picpocket is an image/picture viewer which requires GNU Emacs 24+
-compiled with ImageMagick.  It has commands for:
+Picpocket is an image viewer which requires GNU Emacs 24.4+
+compiled with ImageMagick.  It have commands for:
 
 * File operations on the picture files (delete, move, copy, hardlink).
 * Scale and rotate the picture.
@@ -51,7 +51,7 @@ Picpocket will secretly do stuff in the background with idle
 timers.  This includes to load upcoming pictures into the image
 cache.  The intention is that they should block Emacs for so short
 periods that it is not noticable.  But if you want to get rid of
-them set `picp-inhibit-timers` or kill the picpocket buffer.
+them set `picpocket-inhibit-timers` or kill the picpocket buffer.
 
 Picpocket is to be considered beta software.  Keybindings,
 variables and such may change in future versions.  Tag database
@@ -68,7 +68,7 @@ commands to move picture files to directories according to genre.
 Finally creates also one command to copy pictures to a backup
 directory in the user's home directory.
 
-    (defvar my-picp-alist
+    (defvar my-picpocket-alist
       '((?1 tag "bad")
         (?2 tag "sigh")
         (?3 tag "good")
@@ -81,18 +81,18 @@ directory in the user's home directory.
         (?U move "urban-fantasy")
         (?B copy "~/backup")))
 
-    (setq picp-keystroke-alist 'my-picp-alist)
+    (setq picpocket-keystroke-alist 'my-picpocket-alist)
 
 Digits and capital letters with no modifiers is reserved for these
 kind of user keybindings.
 
-It is recommended to set `picp-keystroke-alist` to a symbol as
-above.  That makes the command `picp-edit-keystrokes` (bound to `e`
-in picpocket buffer) jump to your definition for quick changes.
-Edit the list and type M-C-x to save it.
+It is recommended to set `picpocket-keystroke-alist` to a symbol as
+above.  That makes the command `picpocket-edit-keystrokes` (bound
+to `e` in picpocket buffer) jump to your definition for quick
+changes.  Edit the list and type M-C-x to save it.
 
-See the doc of `picp-keystroke-alist` for about the same thing but
-with a few more details.
+See the doc of `picpocket-keystroke-alist` for about the same thing
+but with a few more details.
 
 
 Tag database
