@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 29
+;; Version: 30
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -280,7 +280,7 @@ Specified in number of default line heigths."
 
 ;;; Internal variables
 
-(defconst picpocket-version 29)
+(defconst picpocket-version 30)
 (defconst picpocket-buffer "*picpocket*")
 (defconst picpocket-undo-buffer "*picpocket-undo*")
 
@@ -552,7 +552,7 @@ This mode is not used directly.  Other modes inherit from this mode."
     (setq mode-line-format nil))
   (add-hook 'kill-emacs-hook #'picpocket-delete-trashcan)
   (add-hook 'kill-buffer-hook #'picpocket-save-journal nil t)
-  (add-hook 'kill-buffer-hook #'picpocket-cleanup-hooks nil t)
+  (add-hook 'kill-buffer-hook #'picpocket-cleanup-most-hooks nil t)
   (add-hook 'window-size-change-functions
             #'picpocket-window-size-change-function)
   (add-hook 'buffer-list-update-hook #'picpocket-maybe-update-keymap)
@@ -564,14 +564,8 @@ This mode is not used directly.  Other modes inherit from this mode."
   (message "Unloading picpocket")
   (picpocket-cancel-timers)
   (picpocket-delete-trashcan)
+  (picpocket-cleanup-most-hooks)
   (remove-hook 'kill-emacs-hook #'picpocket-delete-trashcan)
-  (remove-hook 'window-size-change-functions
-               #'picpocket-window-size-change-function)
-  (remove-hook 'buffer-list-update-hook #'picpocket-maybe-update-keymap)
-  (remove-hook 'buffer-list-update-hook #'picpocket-maybe-rescale)
-  (remove-hook 'focus-in-hook #'picpocket-focus)
-  (remove-hook 'minibuffer-setup-hook #'picpocket-minibuffer-setup)
-  (remove-hook 'minibuffer-exit-hook #'picpocket-minibuffer-exit)
   nil)
 
 (let ((map (make-sparse-keymap))
@@ -2879,10 +2873,23 @@ necessarily run with the picpocket window selected."
       (error "Keystroke %s is not defined in picpocket-keystroke-alist" key)))
 
 (defun picpocket-lookup-key (x)
-  (cl-loop for (key ignored arg) in (picpocket-keystroke-alist)
+  (cl-loop for (key ignored arg) in (picpocket-keystroke-alist-nodups)
            when (equal (picpocket-key-vector x)
                        (picpocket-key-vector key))
            return arg))
+
+(defun picpocket-keystroke-alist-nodups ()
+  (let ((input (picpocket-keystroke-alist))
+        (output nil))
+    (while input
+      (let* ((first-entry (car input))
+             (first-key (car first-entry))
+             (remaining-entries (cdr input)))
+        (unless (assoc first-key remaining-entries)
+          (setq output (cons first-entry output)))
+        (setq input remaining-entries)))
+    (reverse output)))
+
 
 (defun picpocket-keystroke-alist ()
   (if (symbolp picpocket-keystroke-alist)
@@ -2947,8 +2954,8 @@ necessarily run with the picpocket window selected."
 
 (defun picpocket-update-keymap ()
   (picpocket-cleanup-keymap nil picpocket-mode-map)
-  ;; no, this may override user settings....
-  ;; (picpocket-define-keymap picpocket-mode-map)
+  ;; Do not call picpocket-define-keymap here because that may
+  ;; override user regular define-key settings.
   (cl-loop for (key action arg) in (picpocket-keystroke-alist)
            do (define-key picpocket-mode-map
                 (picpocket-key-vector key)
@@ -3146,7 +3153,7 @@ Third invocation will hide the help buffer."
     (princ "User defined picpocket commands:\n\n")
     (princ "key             binding\n")
     (princ "---             -------\n\n")
-    (cl-loop for (key action arg) in (picpocket-keystroke-alist)
+    (cl-loop for (key action arg) in (picpocket-keystroke-alist-nodups)
              do (princ (format "%-16s%s\n"
                                (key-description (picpocket-key-vector key))
                                (picpocket-command-name action arg))))))
@@ -3162,7 +3169,7 @@ Third invocation will hide the help buffer."
       (princ (format "-               add tag instead of remove\n")))
     (when (string-equal what "tag to add")
       (princ (format "-               remove tag instead of add\n")))
-    (cl-loop for (key ignored arg) in (picpocket-keystroke-alist)
+    (cl-loop for (key ignored arg) in (picpocket-keystroke-alist-nodups)
              do (princ (format "%-16s%s\n"
                                (key-description (picpocket-key-vector key))
                                arg)))))
@@ -3979,13 +3986,6 @@ This command picks the first undoable command in that list."
 
 (defun picpocket-init-current-undo ()
   (setq picpocket-current-undo-node (picpocket-first-undo-node)))
-;; (when picpocket-current-undo-node
-;; (let ((old-undo (ewoc-data picpocket-current-undo-node)))
-;; (setq picpocket-current-undo-node
-;; (picpocket-ewoc-find-node picpocket-undo-ewoc old-undo))))
-;; (unless picpocket-current-undo-node
-;; (picpocket-when-let (first-node (picpocket-first-undo-node))
-;; (setq picpocket-current-undo-node first-node))))
 
 (defun picpocket-update-current-undo ()
   (when picpocket-current-undo-node
@@ -4276,13 +4276,20 @@ This command picks the first undoable command in that list."
 
 ;;; Hook functions
 
-(defun picpocket-cleanup-hooks ()
+(defun picpocket-cleanup-most-hooks ()
   (remove-hook 'window-size-change-functions
                #'picpocket-window-size-change-function)
   (remove-hook 'buffer-list-update-hook
                #'picpocket-maybe-update-keymap)
   (remove-hook 'buffer-list-update-hook
-               #'picpocket-maybe-rescale))
+               #'picpocket-maybe-rescale)
+  (remove-hook 'focus-in-hook
+               #'picpocket-focus)
+  (remove-hook 'minibuffer-setup-hook
+               #'picpocket-minibuffer-setup)
+  (remove-hook 'minibuffer-exit-hook
+               #'picpocket-minibuffer-exit))
+
 
 (defun picpocket-window-size-change-function (frame)
   (when picpocket-adapt-to-window-size-change
@@ -4295,10 +4302,9 @@ This command picks the first undoable command in that list."
 
 (defun picpocket-maybe-update-keymap ()
   (and picpocket-keystroke-alist
-       (symbolp picpocket-keystroke-alist)
        (get-buffer picpocket-buffer)
        (eq (current-buffer) (get-buffer picpocket-buffer))
-       (not (eq (symbol-value picpocket-keystroke-alist)
+       (not (eq (picpocket-keystroke-alist)
                 picpocket-old-keystroke-alist))
        (picpocket-update-keymap)))
 
