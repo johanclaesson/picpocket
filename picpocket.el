@@ -2511,7 +2511,9 @@ will end up replacing the deleted text."
 (defun picpocket-ensure-cache (pic)
   (when (file-exists-p (picpocket-absfile pic))
     (picpocket-sha-force pic)
-    (picpocket-size-force pic)
+    ;; PENDING - picpocket-size-force eats a lot of memory and cpu
+    ;; when the pic list is long.  For very little use.
+    ;; (picpocket-size-force pic)
     (picpocket-bytes-force pic)))
 
 (defun picpocket-continue-or-start-over (state)
