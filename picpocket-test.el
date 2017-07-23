@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 30
+;; Version: 31
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -21,6 +21,8 @@
 ;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 ;;; Commentary:
+
+;; ERT tests for picpocket.el.
 
 ;;; Code:
 
@@ -367,13 +369,21 @@ warm/red.svg"
       (unless (or (equal file ".")
                   (equal file ".."))
         (if (file-directory-p file)
-            (unless (member (file-name-as-directory file) picpocket-expected-dirs)
+            (unless (member (file-name-as-directory file)
+                            picpocket-expected-dirs)
               (error "Unexpected directory %s in %s"
                      file default-directory))
           (unless (member file picpocket-expected-files)
             (error "Unexpected file %s in %s"
                    file default-directory)))))))
 
+(defun picpocket-ensure-status-quo ()
+  (should (eq 3 picpocket-list-length))
+  (cl-loop for pic on picpocket-list
+           for expected in picpocket-test-files
+           do (should (equal (picpocket-file pic) expected)))
+  (should (memq picpocket-index (list 1 2 3)))
+  (should (memq (car picpocket-current) picpocket-list)))
 
 
 
@@ -481,8 +491,10 @@ warm/red.svg"
 (ert-deftest picpocket-tree-file-list ()
   :tags '(:picpocket)
   (picpocket-with-test-dir-tree
-    (should (equal (picpocket-report-time (picpocket-file-list default-directory))
-                   (mapcar #'file-truename picpocket-test-tree-files)))))
+    (should (equal (picpocket-report-time (picpocket-file-list
+                                           default-directory))
+                   (mapcar #'file-truename
+                           picpocket-test-tree-files)))))
 
 (ert-deftest picpocket-file-list-symlink-loop ()
   :tags '(:picpocket)
@@ -491,7 +503,8 @@ warm/red.svg"
                       (make-symbolic-link "." "self")
                       (make-symbolic-link "../warm" "cold/w")
                       (make-symbolic-link "../cold" "warm/c")
-                      (should (eq 3 (length (picpocket-file-list picpocket-test-dir)))))
+                      (should (eq 3 (length (picpocket-file-list
+                                             picpocket-test-dir)))))
       (delete-directory picpocket-test-dir t)
       (make-directory picpocket-test-dir))))
 
@@ -526,6 +539,44 @@ warm/red.svg"
       (should (equal 3 picpocket-list-length))
       (should (equal 1 picpocket-index)))))
 
+
+(ert-deftest picpocket-insert-before-current ()
+  :tags '(:picpocket)
+  (picpocket-with-test-buffer
+    ;; Beginning
+    (picpocket-list-delete)
+    (picpocket-list-insert-before-current
+     (picpocket-make-pic (file-truename "blue.svg")))
+    (picpocket-check-only-expected-files)
+    (picpocket-ensure-status-quo)
+    ;; Middle
+    (picpocket-home)
+    (picpocket-next)
+    (picpocket-list-delete)
+    (picpocket-list-insert-before-current
+     (picpocket-make-pic (file-truename "green.svg")))
+    (picpocket-check-only-expected-files)
+    (picpocket-ensure-status-quo)))
+
+(ert-deftest picpocket-insert-after-current ()
+  :tags '(:picpocket)
+  (picpocket-with-test-buffer
+    ;; Middle
+    (picpocket-home)
+    (picpocket-next)
+    (picpocket-list-delete)
+    (picpocket-previous)
+    (picpocket-list-insert-after-current
+     (picpocket-make-pic (file-truename "green.svg")))
+    (picpocket-check-only-expected-files)
+    (picpocket-ensure-status-quo)
+    ;; End
+    (picpocket-end)
+    (picpocket-list-delete)
+    (picpocket-list-insert-after-current
+     (picpocket-make-pic (file-truename "red.svg")))
+    (picpocket-check-only-expected-files)
+    (picpocket-ensure-status-quo)))
 
 (ert-deftest picpocket-add-tag-delete-file ()
   :tags '(:picpocket)
@@ -656,11 +707,13 @@ warm/red.svg"
 
 (ert-deftest picpocket-db-tags-test ()
   (cl-labels ((expect-files (&rest files)
-                            (should (picpocket-lists-equal (picpocket-db-files "sha1")
-                                                      files)))
+                            (should (picpocket-lists-equal
+                                     (picpocket-db-files "sha1")
+                                     files)))
               (expect-tags (tags)
-                           (should (picpocket-lists-equal (picpocket-db-tags "sha1")
-                                                     tags))))
+                           (should (picpocket-lists-equal
+                                    (picpocket-db-tags "sha1")
+                                    tags))))
     (picpocket-with-test-dir
       (picpocket-db-clear)
       (picpocket-db-tags-set "sha1" "a" '(cool fonzy))
