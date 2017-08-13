@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 31
+;; Version: 32
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -291,7 +291,7 @@ This affects the commands `picpocket-scroll-some-*'."
 
 ;;; Internal variables
 
-(defconst picpocket-version 31)
+(defconst picpocket-version 32)
 (defconst picpocket-buffer "*picpocket*")
 (defconst picpocket-undo-buffer "*picpocket-undo*")
 
@@ -770,8 +770,7 @@ that."
                                          (picpocket-rotation)))
                    (+ (picpocket-rotation) delta))))
     (picpocket-error-if-rotation-is-unsupported)
-    (picpocket-set-rotation picpocket-current degrees)
-    (picpocket-old-update-buffer)))
+    (picpocket-set-rotation picpocket-current degrees)))
 
 
 (defun picpocket-scale-in (&optional arg)
@@ -782,8 +781,7 @@ With prefix arg (ARG) read scale percent in minibuffer."
     (if arg
         (setq picpocket-scale (read-number "Scale factor: " picpocket-scale))
       (picpocket-alter-scale 10))
-    (picpocket-warn-if-scaling-is-unsupported)
-    (picpocket-old-update-buffer)))
+    (picpocket-warn-if-scaling-is-unsupported)))
 
 (defun picpocket-scale-out (&optional arg)
   "Zoom out 10%.
@@ -795,8 +793,7 @@ With prefix arg (ARG) read scale percent in minibuffer."
                                            picpocket-scale))
       (picpocket-alter-scale -10))
     (picpocket-warn-if-scaling-is-unsupported)
-    (picpocket-avoid-overscroll)
-    (picpocket-old-update-buffer)))
+    (picpocket-avoid-overscroll)))
 
 (defun picpocket-reset-scale ()
   "Reset the scale to 100%."
@@ -804,8 +801,7 @@ With prefix arg (ARG) read scale percent in minibuffer."
   (picpocket-command
     (setq picpocket-scale 100)
     (message "Restore the scale to 100%%.")
-    (picpocket-avoid-overscroll)
-    (picpocket-old-update-buffer)))
+    (picpocket-avoid-overscroll)))
 
 (defun picpocket-fit-to-both-width-and-height ()
   "Fit the picture to both width and height of window.
@@ -818,8 +814,7 @@ scaling can be restored to 100% by typing \\[picpocket-reset-scale]
     (picpocket-reset-scroll)
     (setq picpocket-fit :x-and-y)
     (message "Fit picture to both width and height")
-    (picpocket-warn-if-scaling-is-unsupported)
-    (picpocket-old-update-buffer)))
+    (picpocket-warn-if-scaling-is-unsupported)))
 
 (defun picpocket-fit-to-width ()
   "Fit the picture to the width of window.
@@ -832,8 +827,7 @@ scaling can be restored to 100% by typing \\[picpocket-reset-scale]
     (picpocket-reset-scroll)
     (setq picpocket-fit :x)
     (message "Fit picture to width")
-    (picpocket-warn-if-scaling-is-unsupported)
-    (picpocket-old-update-buffer)))
+    (picpocket-warn-if-scaling-is-unsupported)))
 
 (defun picpocket-fit-to-height ()
   "Fit the picture to the height of window.
@@ -846,8 +840,7 @@ scaling can be restored to 100% by typing \\[picpocket-reset-scale]
     (picpocket-reset-scroll)
     (setq picpocket-fit :y)
     (message "Fit picture to height")
-    (picpocket-warn-if-scaling-is-unsupported)
-    (picpocket-old-update-buffer)))
+    (picpocket-warn-if-scaling-is-unsupported)))
 
 (defun picpocket-no-fit ()
   "Do not fit the picture to the window."
@@ -855,8 +848,7 @@ scaling can be restored to 100% by typing \\[picpocket-reset-scale]
   (picpocket-command
     (picpocket-reset-scroll)
     (setq picpocket-fit nil)
-    (message "Do not fit picture to window size")
-    (picpocket-old-update-buffer)))
+    (message "Do not fit picture to window size")))
 
 
 (defun picpocket-set-backdrop ()
@@ -1011,8 +1003,7 @@ this frame and go back to the old frame."
           (delete-frame picpocket-frame)
           (setq picpocket-frame nil)
           (picpocket-select-frame picpocket-old-frame)
-          (setq mode-line-format (default-value 'mode-line-format))
-          (picpocket-old-update-buffer))
+          (setq mode-line-format (default-value 'mode-line-format)))
       (setq picpocket-old-frame (selected-frame)
             ;; Do not disable scroll bars and fringes, they are disabled
             ;; on buffer level instead.
@@ -1035,8 +1026,7 @@ this frame and go back to the old frame."
 
       ;; Resdisplay seem to be needed to get accurate return value from
       ;; window-inside-pixel-edges.
-      (redisplay)
-      (picpocket-old-update-buffer))))
+      (redisplay))))
 
 (defvar picpocket-last-frame-that-used-minibuffer nil)
 
@@ -1077,8 +1067,7 @@ This hook make sure it is fitted to `picpocket-frame'."
     (let ((next (picpocket-next-pos)))
       (if next
           (picpocket-set-pos next)
-        (picpocket-no-file "next")))
-    (picpocket-old-update-buffer)))
+        (picpocket-no-file "next")))))
 
 (defun picpocket-next-pos (&optional pos)
   (unless pos
@@ -1110,8 +1099,7 @@ This hook make sure it is fitted to `picpocket-frame'."
     (let ((prev (picpocket-previous-pos)))
       (if prev
           (picpocket-set-pos prev)
-        (picpocket-no-file "previous")))
-    (picpocket-old-update-buffer)))
+        (picpocket-no-file "previous")))))
 
 (defun picpocket-previous-pic ()
   (picpocket-when-let (pos (picpocket-previous-pos))
@@ -1142,8 +1130,7 @@ This hook make sure it is fitted to `picpocket-frame'."
       (let ((next (picpocket-next-pos)))
         (if next
             (picpocket-set-pos next)
-          (picpocket-no-file))))
-    (picpocket-old-update-buffer)))
+          (picpocket-no-file))))))
 
 (defun picpocket-first-pos ()
   (make-picpocket-pos :current picpocket-list
@@ -1162,8 +1149,7 @@ This hook make sure it is fitted to `picpocket-frame'."
       (let ((prev (picpocket-previous-pos)))
         (if prev
             (picpocket-set-pos prev)
-          (picpocket-no-file))))
-    (picpocket-old-update-buffer)))
+          (picpocket-no-file))))))
 
 (defun picpocket-last-pos ()
   (cl-loop for pic on picpocket-current
@@ -1180,8 +1166,7 @@ This hook make sure it is fitted to `picpocket-frame'."
     (when (or (not picpocket-confirm-delete)
               (picpocket-y-or-n-p "Delete file %s from disk? "
                                   (picpocket-file)))
-      (picpocket-action 'delete nil)
-      (picpocket-old-update-buffer))))
+      (picpocket-action 'delete nil))))
 
 (defun picpocket-y-or-n-p (format &rest objects)
   (let* ((prompt (apply #'format format objects))
@@ -1197,8 +1182,7 @@ The repeatable actions are:
   (picpocket-command
     (unless picpocket-last-action
       (user-error "No repeatable action have been done"))
-    (picpocket-action picpocket-last-action picpocket-last-arg)
-    (picpocket-old-update-buffer)))
+    (picpocket-action picpocket-last-action picpocket-last-arg)))
 
 (defun picpocket-dired ()
   "Visit the current directory in `dired-mode'."
@@ -1264,8 +1248,7 @@ When called from Lisp DST is the new absolute filename."
     (picpocket-action (if (file-directory-p dst)
                           'move
                         'rename)
-                      dst)
-    (picpocket-old-update-buffer)))
+                      dst)))
 
 
 (defun picpocket-move (all dst)
@@ -1275,8 +1258,7 @@ The picture will also be removed from the picpocket list.
 When called from Lisp DST is the destination directory."
   (interactive (picpocket-read-destination 'move))
   (picpocket-command
-    (picpocket-action 'move dst all)
-    (picpocket-old-update-buffer)))
+    (picpocket-action 'move dst all)))
 
 (defun picpocket-copy (all dst)
   "Copy the current picture to another directory.
@@ -1284,8 +1266,7 @@ With prefix arg (ALL) copy all pictures in the current list.
 When called from Lisp DST is the destination directory."
   (interactive (picpocket-read-destination 'copy))
   (picpocket-command
-    (picpocket-action 'copy dst all)
-    (picpocket-old-update-buffer)))
+    (picpocket-action 'copy dst all)))
 
 (defun picpocket-hardlink (all dst)
   "Make a hard link to the current picture in another directory.
@@ -1293,8 +1274,7 @@ With prefix arg (ALL) hard link all pictures in the current list.
 When called from Lisp DST is the destination directory."
   (interactive (picpocket-read-destination 'hardlink))
   (picpocket-command
-    (picpocket-action 'hardlink dst all)
-    (picpocket-old-update-buffer)))
+    (picpocket-action 'hardlink dst all)))
 
 (defun picpocket-read-destination (action)
   (picpocket-ensure-current-pic)
@@ -1353,8 +1333,7 @@ With prefix arg (ALL) hard link all pictures in the current list."
                         (if all " all pictures" ""))))
     (picpocket-action action
                       (picpocket-read-key prompt)
-                      (when all 'all))
-    (picpocket-old-update-buffer)))
+                      (when all 'all))))
 
 
 (defun picpocket-tag-by-keystroke (&optional all)
@@ -1372,8 +1351,7 @@ remove the tag from all pictures instead."
       (`(,remove ,tag)
        (picpocket-action (if remove 'remove-tag 'add-tag)
                          tag
-                         (if all 'all))))
-    (picpocket-old-update-buffer)))
+                         (if all 'all))))))
 
 (defun picpocket-edit-tags (&optional all tags-string)
   "Edit the tags associated with current picture.
@@ -1392,8 +1370,7 @@ sign (-) then the tag is removed from all pictures instead."
              (new-tags-string (or tags-string
                                   (picpocket-read-tags "Tags: "
                                                        old-tags-string))))
-        (picpocket-action 'set-tags new-tags-string)))
-    (picpocket-old-update-buffer)))
+        (picpocket-action 'set-tags new-tags-string)))))
 
 (defun picpocket-read-tag-for-all ()
   (picpocket-read-tags "Type tag to add to all files (-tag to remove): "))
@@ -1456,8 +1433,7 @@ space-separated string."
     (picpocket-do-set-filter (mapcar #'intern (split-string filter-string)))
     (if picpocket-filter
         (message "Filter is %s" (picpocket-format-tags picpocket-filter))
-      (message "No filter"))
-    (picpocket-old-update-buffer)))
+      (message "No filter"))))
 
 (defun picpocket-do-set-filter (filter)
   (setq picpocket-filter filter)
@@ -1517,8 +1493,7 @@ space-separated string."
                                             (picpocket-mapcar
                                              'picpocket-file))))
       (or (picpocket-jump-to-index nr-or-file-name)
-          (picpocket-jump-to-file nr-or-file-name))
-      (picpocket-old-update-buffer))))
+          (picpocket-jump-to-file nr-or-file-name)))))
 
 (defun picpocket-jump-to-index (string)
   (when (string-match "^[0-9]+$" string)
@@ -2844,8 +2819,8 @@ will end up replacing the deleted text."
 (defun picpocket-ensure-cache (pic)
   (when (file-exists-p (picpocket-absfile pic))
     (picpocket-sha-force pic)
-    ;; PENDING - picpocket-size-force eats a lot of memory and cpu
-    ;; when the pic list is long.  For very little use.
+    ;; picpocket-size-force eats a lot of memory and cpu when the pic
+    ;; list is long.  For very little use.
     ;; (picpocket-size-force pic)
     (picpocket-bytes-force pic)))
 
@@ -2929,9 +2904,6 @@ considered invalid and we start from the beginning again."
 
 
 ;;; Buffer content functions
-
-;; PENDING - Replaced by picpocket-command.....to be removed.....
-(defun picpocket-old-update-buffer ())
 
 (defun picpocket-ensure-picpocket-buffer ()
   (unless (and (equal (buffer-name) picpocket-buffer)
@@ -3346,8 +3318,7 @@ necessarily run with the picpocket window selected."
                     ,(format "Add tag %s." tag)
                     (interactive)
                     (picpocket-command
-                      (picpocket-action 'add-tag ,tag)
-                      (picpocket-old-update-buffer))))
+                      (picpocket-action 'add-tag ,tag))))
     (put symbol 'picpocket-user-command 'add-tag)
     symbol))
 
@@ -3360,9 +3331,7 @@ DST is the destination directory."
                     ,(picpocket-command-doc action dst)
                     (interactive)
                     (picpocket-command
-                      (picpocket-action ',action ,dst)
-                      ,(when (eq action 'move)
-                         '(picpocket-old-update-buffer)))))
+                      (picpocket-action ',action ,dst))))
     (put symbol 'picpocket-user-command 'file)
     symbol))
 
@@ -4671,8 +4640,8 @@ This command picks the first undoable command in that list."
          (eq (current-buffer) buffer)
          (eq (window-buffer) buffer)
          ;; It is important to check and save window size here.
-         ;; Otherwise the call to picpocket-old-update-buffer may trigger an
-         ;; infinite loop via buffer-list-update-hook.
+         ;; Otherwise the call to picpocket-update-buffer may trigger
+         ;; an infinite loop via buffer-list-update-hook.
          (progn
            ;; (picpocket-reset-scroll)
            (unless (equal picpocket-window-size (picpocket-save-window-size))
