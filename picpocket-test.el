@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 32
+;; Version: 33
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -170,14 +170,19 @@ warm/red.svg"
   (let ((picpocket-clock-file "~/share/elisp/picpocket-clock-release.txt"))
     (picpocket-bench)))
 
+(defun picpocket-tmp-bench ()
+  (let ((picpocket-clock-file "~/share/elisp/picpocket-clock-tmp.txt"))
+    (picpocket-bench))
+  (with-current-buffer "*Messages*"
+    (write-file "messages.txt")))
+
 ;; PENDING - picpocket-file-list bench
-;; PENDING - Make it possible to compare older versions
-;; Probably should put git tags on each version.
 (defun picpocket-bench ()
   (let ((imagemagick-render-type 1))
     (picpocket-with-clock "Default benchmark"
       (picpocket-clock (picpocket-directory "~/bilder/japan/dvd/"))
       (with-current-buffer picpocket-buffer
+        ;; (picpocket-toggle-fullscreen-frame)
         (dotimes (ignored 30)
           (picpocket-clock (picpocket-look-ahead-next))
           (picpocket-clock (redisplay))

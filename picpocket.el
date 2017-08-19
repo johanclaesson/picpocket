@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 32
+;; Version: 33
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -289,9 +289,19 @@ Horisontal scrolling commands always scroll one column."
 This affects the commands `picpocket-scroll-some-*'."
   :type 'number)
 
+(defcustom picpocket-frame-foreground-color nil
+  "Foreground color of picpocket fullscreen frame."
+  :type 'color)
+
+(defcustom picpocket-frame-background-color nil
+  "Background color of picpocket fullscreen frame."
+  :type 'color)
+
+
+
 ;;; Internal variables
 
-(defconst picpocket-version 32)
+(defconst picpocket-version 33)
 (defconst picpocket-buffer "*picpocket*")
 (defconst picpocket-undo-buffer "*picpocket-undo*")
 
@@ -341,6 +351,7 @@ not necessarily run with the picpocket window selected.")
 (defvar picpocket-fatal nil)
 (defvar picpocket-scroll-command nil)
 (defvar picpocket-old-fit nil)
+(defvar picpocket-last-frame-that-used-minibuffer nil)
 
 
 ;; Variables displayed in the header-line must be marked as risky.
@@ -999,41 +1010,53 @@ this frame and go back to the old frame."
   (interactive)
   (picpocket-command
     (if (picpocket-fullscreen-p)
-        (progn
+        (let ((inhibit-quit t))
           (delete-frame picpocket-frame)
           (setq picpocket-frame nil)
           (picpocket-select-frame picpocket-old-frame)
-          (setq mode-line-format (default-value 'mode-line-format)))
-      (setq picpocket-old-frame (selected-frame)
-            ;; Do not disable scroll bars and fringes, they are disabled
-            ;; on buffer level instead.
-            picpocket-frame (make-frame `((name . "picpocket")
-                                          (menu-bar-lines . 0)
-                                          (tool-bar-lines . 0)
-                                          (minibuffer . nil)
-                                          (fullscreen . fullboth)
-                                          ;; PENDING - background-color seem
-                                          ;; to mess up the cache.
-                                          ;; See image.c:search_image_cache.
-                                          ;; (foreground-color . "white")
-                                          ;; (background-color . "black")
-                                          )))
-      (picpocket-select-frame picpocket-frame)
-      (setq mode-line-format nil)
-      (add-hook 'focus-in-hook #'picpocket-focus)
-      (add-hook 'minibuffer-setup-hook #'picpocket-minibuffer-setup)
-      (add-hook 'minibuffer-exit-hook #'picpocket-minibuffer-exit)
-
+          (with-selected-frame picpocket-old-frame
+            (switch-to-buffer picpocket-buffer))
+          (with-current-buffer picpocket-buffer
+            (setq mode-line-format (default-value 'mode-line-format))))
+      ;; Bury the picpocket buffer in the old frame.  This relieves
+      ;; the display engine from updating that as well.  This is
+      ;; important when the fullscreen frame have a different
+      ;; background-color or foreground-color.  These frame parameters
+      ;; are considered during image cache lookup (see
+      ;; image.c:search_image_cache).  Therefore each frame would have
+      ;; it's own cache entry in the case where these colors differ.
+      (bury-buffer)
+      (setq picpocket-old-frame (selected-frame))
+      ;; Do not disable scroll bars and fringes, they are disabled
+      ;; on buffer level instead.
+      (let ((inhibit-quit t)
+            (foreground (or picpocket-frame-foreground-color
+                            (frame-parameter nil 'foreground-color)))
+            (background (or picpocket-frame-background-color
+                            (frame-parameter nil 'background-color))))
+        (setq picpocket-frame (make-frame `((name . "picpocket")
+                                            (menu-bar-lines . 0)
+                                            (tool-bar-lines . 0)
+                                            (minibuffer . nil)
+                                            (fullscreen . fullboth)
+                                            (foreground-color . ,foreground)
+                                            (background-color . ,background))))
+        (picpocket-select-frame picpocket-frame)
+        (switch-to-buffer picpocket-buffer)
+        (with-current-buffer picpocket-buffer
+          (setq mode-line-format nil)
+          (add-hook 'focus-in-hook #'picpocket-focus)
+          (add-hook 'minibuffer-setup-hook #'picpocket-minibuffer-setup)
+          (add-hook 'minibuffer-exit-hook #'picpocket-minibuffer-exit)))
       ;; Resdisplay seem to be needed to get accurate return value from
       ;; window-inside-pixel-edges.
       (redisplay))))
 
-(defvar picpocket-last-frame-that-used-minibuffer nil)
 
 (defun picpocket-focus ()
-  "Update picture when `picpocket-minibuffer-exit' select `picpocket-frame'.
+  "Update picture when `picpocket-minibuffer-exit' select the picpocket frame.
 Without this the picture size may be fitted to the wrong frame.
-This hook make sure it is fitted to `picpocket-frame'."
+This hook make sure it is fitted to the picpocket frame."
   (and (eq (selected-frame) picpocket-frame)
        (eq (current-buffer) (get-buffer picpocket-buffer))
        (picpocket-update-buffer)))
@@ -1052,6 +1075,10 @@ This hook make sure it is fitted to `picpocket-frame'."
   (and picpocket-frame
        (frame-live-p picpocket-frame)))
 
+(defun picpocket-frame ()
+  (if (picpocket-fullscreen-p)
+      picpocket-frame
+    (selected-frame)))
 
 (defun picpocket-select-frame (frame)
   (select-frame-set-input-focus frame)
@@ -2017,10 +2044,10 @@ The length scrolled is the width of the picture multiplied with
             (when (string-match (picpocket-picture-regexp) file)
               (push path pic-files)
               (when (zerop (% (cl-incf picpocket-file-count) 100))
-                (message "Found %s pictures so far %s"
+                (message "Found %s pictures so far%s"
                          picpocket-file-count
                          (if picpocket-recursive
-                             (format "(%s)" dir)
+                             (format " (%s)" dir)
                            ""))))))
         (setq pic-files (nreverse pic-files))
         (when picpocket-recursive
@@ -3113,9 +3140,8 @@ necessarily run with the picpocket window selected."
   (picpocket-ensure-cache pic)
   (image-size (picpocket-create-image pic picpocket-window-size)
               t
-              (if (picpocket-fullscreen-p)
-                  picpocket-frame
-                (selected-frame))))
+              (picpocket-frame)))
+
 
 (defun picpocket-scale (n)
   (/ (* picpocket-scale n) 100))
