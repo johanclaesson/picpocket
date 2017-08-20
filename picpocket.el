@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 33
+;; Version: 34
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -301,7 +301,7 @@ This affects the commands `picpocket-scroll-some-*'."
 
 ;;; Internal variables
 
-(defconst picpocket-version 33)
+(defconst picpocket-version 34)
 (defconst picpocket-buffer "*picpocket*")
 (defconst picpocket-undo-buffer "*picpocket-undo*")
 
@@ -1887,9 +1887,9 @@ The length scrolled is the width of the picture multiplied with
   (picpocket-set-file pic (file-name-nondirectory absfile))
   (picpocket-set-dir pic (file-name-directory absfile)))
 
-(defun picpocket-make-pic (path)
-  (make-picpocket-pic :dir (file-truename (file-name-directory path))
-                      :file (file-name-nondirectory path)))
+(defun picpocket-make-pic (absfile)
+  (make-picpocket-pic :dir (file-truename (file-name-directory absfile))
+                      :file (file-name-nondirectory absfile)))
 
 (defun picpocket-list-reset ()
   (setq picpocket-list nil
@@ -1998,10 +1998,10 @@ The length scrolled is the width of the picture multiplied with
 (defun picpocket-create-picpocket-list (files &optional selected-file)
   (picpocket-reset)
   (setq picpocket-list
-        (cl-loop for path in files
-                 if (file-exists-p path)
-                 collect (picpocket-make-pic path)
-                 else do (message "%s do not exist" path)))
+        (cl-loop for absfile in files
+                 if (file-exists-p absfile)
+                 collect (picpocket-make-pic absfile)
+                 else do (message "%s do not exist" absfile)))
   (cl-loop for pic on picpocket-list
            with prev = nil
            do (picpocket-set-prev pic prev)
@@ -2036,13 +2036,13 @@ The length scrolled is the width of the picture multiplied with
   (push dir picpocket-done-dirs)
   (condition-case err
       (let ((files (picpocket-sort-files (directory-files dir nil "[^.]" t)))
-            path pic-files sub-files subdirs)
+            absfile pic-files sub-files subdirs)
         (dolist (file files)
-          (setq path (expand-file-name file dir))
-          (if (file-directory-p path)
-              (push path subdirs)
+          (setq absfile (expand-file-name file dir))
+          (if (file-directory-p absfile)
+              (push absfile subdirs)
             (when (string-match (picpocket-picture-regexp) file)
-              (push path pic-files)
+              (push absfile pic-files)
               (when (zerop (% (cl-incf picpocket-file-count) 100))
                 (message "Found %s pictures so far%s"
                          picpocket-file-count
@@ -3822,7 +3822,7 @@ the delete action, though)."
    (mapcar #'intern
            (split-string tags-string))))
 
-(defun picpocket-new-path-for-file-action (action dst pic)
+(defun picpocket-new-absfile-for-file-action (action dst pic)
   (file-truename
    (if (eq action 'rename)
        dst
@@ -3834,34 +3834,34 @@ the delete action, though)."
 
 (defun picpocket-file-action (action dst pic)
   (let* ((pic (or pic picpocket-current))
-         (new-path (picpocket-new-path-for-file-action action dst pic))
+         (new-absfile (picpocket-new-absfile-for-file-action action dst pic))
          (old-dir (picpocket-dir pic))
          (old-file (picpocket-file pic))
-         (old-path (concat old-dir old-file))
-         (new-dir (file-name-directory new-path))
-         (new-file (file-name-nondirectory new-path))
+         (old-absfile (concat old-dir old-file))
+         (new-dir (file-name-directory new-absfile))
+         (new-file (file-name-nondirectory new-absfile))
          (ok-if-already-exists noninteractive))
     (make-directory new-dir t)
-    (while (and (file-exists-p new-path)
+    (while (and (file-exists-p new-absfile)
                 (not ok-if-already-exists))
-      (cond ((equal old-path new-path)
+      (cond ((equal old-absfile new-absfile)
              (user-error "Attempt to %s file to itself"
                          (symbol-name action)))
-            ((file-directory-p new-path)
-             (error "%s already exists as a directory" new-path))
-            ((picpocket-files-identical-p old-path new-path)
+            ((file-directory-p new-absfile)
+             (error "%s already exists as a directory" new-absfile))
+            ((picpocket-files-identical-p old-absfile new-absfile)
              (if (y-or-n-p (concat "Identical file already exists in "
                                    new-dir ".  Overwrite? "))
                  (setq ok-if-already-exists t)
-               (user-error "Not overwriting %s" new-path)))
+               (user-error "Not overwriting %s" new-absfile)))
             (t
-             (setq new-file (picpocket-compare pic new-path)
-                   new-path (concat new-dir new-file)))))
+             (setq new-file (picpocket-compare pic new-absfile)
+                   new-absfile (concat new-dir new-file)))))
     (pcase action
       ((or `move `rename)
-       (picpocket-file-relocate-action action old-path new-path pic))
+       (picpocket-file-relocate-action action old-absfile new-absfile pic))
       ((or `copy `hardlink)
-       (picpocket-file-duplicate-action action old-path new-path pic))
+       (picpocket-file-duplicate-action action old-absfile new-absfile pic))
       (_ (error "Invalid picpocket action %s" action)))))
 
 (defun picpocket-files-identical-p (a b)
@@ -3886,35 +3886,35 @@ the delete action, though)."
     (insert-file-contents-literally file)
     (buffer-substring-no-properties (point-min) (point-max))))
 
-(defun picpocket-file-relocate-action (action old-path new-path pic)
-  (let ((new-dir (file-name-directory new-path))
-        (new-file (file-name-nondirectory new-path))
-        (old-dir (file-name-directory old-path))
-        (old-file (file-name-nondirectory old-path))
+(defun picpocket-file-relocate-action (action old-absfile new-absfile pic)
+  (let ((new-dir (file-name-directory new-absfile))
+        (new-file (file-name-nondirectory new-absfile))
+        (old-dir (file-name-directory old-absfile))
+        (old-file (file-name-nondirectory old-absfile))
         (inhibit-quit t)
         trash-file)
-    (when (file-exists-p new-path)
+    (when (file-exists-p new-absfile)
       (setq trash-file (picpocket-trash-file new-file))
-      (rename-file new-path trash-file))
+      (rename-file new-absfile trash-file))
     (picpocket-stash-undo-op :action action
-                             :file old-path
-                             :to-file new-path
+                             :file old-absfile
+                             :to-file new-absfile
                              :trash-file trash-file
                              :sha (picpocket-sha-force pic))
-    (rename-file old-path new-path t)
-    (picpocket-tags-move-file pic old-path new-path)
+    (rename-file old-absfile new-absfile t)
+    (picpocket-tags-move-file pic old-absfile new-absfile)
     (cond ((or (eq action 'move)
                (equal old-file new-file))
            (picpocket-list-delete pic)
            (message "Moved %s to %s."
-                    (file-name-nondirectory old-path)
-                    (file-name-directory new-path)))
+                    (file-name-nondirectory old-absfile)
+                    (file-name-directory new-absfile)))
           ((equal old-dir new-dir)
            (picpocket-set-file pic new-file)
            (message "Renamed %s to %s." old-file new-file))
           (t
            (picpocket-list-delete pic)
-           (message "Renamed and moved %s to %s." old-file new-path)))))
+           (message "Renamed and moved %s to %s." old-file new-absfile)))))
 
 (defun picpocket-undo-file-relocate-action (op)
   (let ((file (picpocket-op-file op))
@@ -3946,23 +3946,23 @@ the delete action, though)."
                                (picpocket-op-action op))
                               (file-name-nondirectory file))))))
 
-(defun picpocket-file-duplicate-action (action old-path new-path pic)
-  (let ((old-file (file-name-nondirectory old-path))
+(defun picpocket-file-duplicate-action (action old-absfile new-absfile pic)
+  (let ((old-file (file-name-nondirectory old-absfile))
         (inhibit-quit t)
         trash-file)
-    (picpocket-tags-copy-file picpocket-current new-path)
-    (when (file-exists-p new-path)
-      (setq trash-file (picpocket-trash-file new-path))
-      (rename-file new-path trash-file))
+    (picpocket-tags-copy-file picpocket-current new-absfile)
+    (when (file-exists-p new-absfile)
+      (setq trash-file (picpocket-trash-file new-absfile))
+      (rename-file new-absfile trash-file))
     (if (eq action 'copy)
-        (copy-file old-path new-path t)
-      (add-name-to-file old-path new-path t))
+        (copy-file old-absfile new-absfile t)
+      (add-name-to-file old-absfile new-absfile t))
     (picpocket-stash-undo-op :action action
-                             :file old-path
-                             :to-file new-path
+                             :file old-absfile
+                             :to-file new-absfile
                              :trash-file trash-file
                              :sha (picpocket-sha-force pic))
-    (picpocket-duplicate-message action old-file new-path)))
+    (picpocket-duplicate-message action old-file new-absfile)))
 
 (defun picpocket-undo-file-duplicate-action (op)
   (let ((to-file (picpocket-op-to-file op))
@@ -3992,13 +3992,13 @@ the delete action, though)."
            old
            dst))
 
-(defun picpocket-compare (pic new-path)
+(defun picpocket-compare (pic new-absfile)
   (unwind-protect
       (let (picpocket-adapt-to-window-size-change)
-        (picpocket-show-two-pictures pic new-path)
+        (picpocket-show-two-pictures pic new-absfile)
         (read-string (format (concat "File already exists (size %s)."
                                      "  Rename this (size %s) to: ")
-                             (picpocket-kb (picpocket-file-bytes new-path))
+                             (picpocket-kb (picpocket-file-bytes new-absfile))
                              (picpocket-kb (picpocket-bytes-force pic)))
                      (picpocket-file pic)))
     (picpocket-update-buffer)))
