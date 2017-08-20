@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 34
+;; Version: 35
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -301,7 +301,7 @@ This affects the commands `picpocket-scroll-some-*'."
 
 ;;; Internal variables
 
-(defconst picpocket-version 34)
+(defconst picpocket-version 35)
 (defconst picpocket-buffer "*picpocket*")
 (defconst picpocket-undo-buffer "*picpocket-undo*")
 
@@ -2293,9 +2293,15 @@ the database for the given SHA."
 
     (setq picpocket-db-mode-map (make-sparse-keymap))
 
+    (insert (picpocket-emph "%s tags (%s unique) on %s files found.\n\n"
+                            (picpocket-db-number-of-tags)
+                            (picpocket-db-number-of-unique-tags)
+                            (picpocket-db-count)))
+
     ;; exif -c -o x.jpg --ifd=EXIF -t0x9286 --set-value=foo x.jpg
     (if (null sha-changed)
-        (picpocket-emph "No files with changed sha1 checksum found.\n\n")
+        (insert
+         (picpocket-emph "No files with changed sha1 checksum found.\n\n"))
       (let ((n (length sha-changed)))
         (picpocket-db-update-command [?s]
           (lambda ()
@@ -2473,6 +2479,17 @@ will end up replacing the deleted text."
                        picpocket-tag-completion-table)))
            picpocket-db))
 
+(defun picpocket-db-number-of-tags ()
+  (let ((count 0))
+    (maphash (lambda (_ plist)
+               (cl-incf count (length (plist-get plist :tags))))
+             picpocket-db)
+    count))
+
+(defun picpocket-db-number-of-unique-tags ()
+  (let ((count 0))
+    (mapatoms (lambda (_) (cl-incf count)) picpocket-tag-completion-table)
+    count))
 
 
 ;;; Database

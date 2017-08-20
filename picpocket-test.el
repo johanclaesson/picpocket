@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 34
+;; Version: 35
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
