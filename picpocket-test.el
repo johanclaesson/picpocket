@@ -2,7 +2,8 @@
 
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 36
+;; URL: https://github.com/johanclaesson/picpocket
+;; Version: 37
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -596,15 +597,11 @@ warm/red.svg"
 (ert-deftest picpocket-delete-from-beginning ()
   :tags '(:picpocket)
   (picpocket-with-test-buffer
-    (picpocket-dump)
     (picpocket-delete-file)
-    (picpocket-dump)
     (should (eq 2 (length picpocket-list)))
     (picpocket-delete-file)
-    (picpocket-dump)
     (should (eq 1 (length picpocket-list)))
     (picpocket-delete-file)
-    (picpocket-dump)
     (picpocket-list-should-be-reset)))
 
 (ert-deftest picpocket-delete-from-the-middle-and-end ()
@@ -616,7 +613,6 @@ warm/red.svg"
     (picpocket-delete-file)
     (should (eq 1 (length picpocket-list)))
     (picpocket-delete-file)
-    (picpocket-dump)
     (picpocket-list-should-be-reset)))
 
 (ert-deftest picpocket-move-all ()

@@ -3,7 +3,8 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
-;; Version: 36
+;; URL: https://github.com/johanclaesson/picpocket
+;; Version: 37
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -304,7 +305,7 @@ This affects the commands `picpocket-scroll-some-*'."
 
 ;;; Internal variables
 
-(defconst picpocket-version 36)
+(defconst picpocket-version 37)
 (defconst picpocket-buffer "*picpocket*")
 (defconst picpocket-undo-buffer "*picpocket-undo*")
 
@@ -3177,9 +3178,6 @@ necessarily run with the picpocket window selected."
         (max 10 (+ picpocket-scale delta)))
   (message "Scaling factor is %s%%" picpocket-scale))
 
-(defun picpocket-imagemagick-p ()
-  (picpocket-picture-regexp))
-
 (defun picpocket-picture-regexp ()
   (or picpocket-picture-regexp
       (setq picpocket-picture-regexp
@@ -4733,31 +4731,55 @@ This command picks the first undoable command in that list."
                                         (picpocket-sec-string picpocket-sum)))
     (message "picpocket-debug: %s" picpocket-header-text)))
 
+(defvar picpocket-dump-buffer "*picpocket-dump*")
+
 (defun picpocket-dump ()
   "Print some picpocket variables."
   (interactive)
-  (picpocket-command
-    (picpocket-print 'picpocket-list)
-    (picpocket-print 'picpocket-current)
-    (picpocket-print 'picpocket-index)
-    (picpocket-print 'picpocket-list-length)
-    (message "")
-    (view-echo-area-messages)
-    t))
+  (picpocket-bye-command
+    (with-current-buffer (get-buffer-create picpocket-dump-buffer)
+      (erase-buffer))
+    (picpocket-dump-var 'picpocket-list)
+    (picpocket-dump-var 'picpocket-current)
+    (picpocket-dump-var 'picpocket-index)
+    (picpocket-dump-var 'picpocket-list-length)
+    (picpocket-dump-var 'picpocket-filter)
+    (picpocket-dump-var 'picpocket-filter-index)
+    (picpocket-dump-var 'picpocket-filter-match-count)
+    (picpocket-dump-var 'picpocket-fatal)
+    (picpocket-dump-var 'picpocket-recursive)
+    (picpocket-dump-var 'picpocket-version)
+    (picpocket-dump-var 'picpocket-entry-function)
+    (picpocket-dump-var 'picpocket-entry-args)
+    (picpocket-dump-var 'picpocket-picture-regexp)
+    (picpocket-dump-var 'image-type-file-name-regexps)
+    (picpocket-dump-some "current-pos"
+                         (picpocket-simplify-pos (picpocket-current-pos)))
+    (picpocket-dump-some "next-pos"
+                         (picpocket-simplify-pos (picpocket-next-pos)))
+    (picpocket-dump-some "prev-pos"
+                         (picpocket-simplify-pos (picpocket-previous-pos)))
+    (switch-to-buffer picpocket-dump-buffer)))
 
-(defun picpocket-print (var)
+(defun picpocket-dump-some (name value)
+  (with-current-buffer picpocket-dump-buffer
+    (insert (format "%-20s %s\n"
+                    (replace-regexp-in-string "^picpocket" "pp" name)
+                    (with-temp-buffer
+                      (pp value (current-buffer))
+                      (goto-char (point-min))
+                      (forward-line)
+                      (indent-rigidly (point) (point-max) 20)
+                      (buffer-string))))))
+
+(defun picpocket-dump-var (var)
   (let ((value (symbol-value var)))
     (and (listp value)
          (picpocket-pic-p (car value))
          (setq value (picpocket-simplify-list value)))
-    (message "%-20s%s"
-             var
-             (with-temp-buffer
-               (pp value (current-buffer))
-               (goto-char (point-min))
-               (forward-line)
-               (indent-rigidly (point) (point-max) 20)
-               (buffer-string)))))
+    (picpocket-dump-some (symbol-name var) value)))
+
+
 
 (defun picpocket-simplify-list (&optional list)
   "Print the LIST or current picture list without the prev links.
@@ -4766,6 +4788,13 @@ With the prev links it is harder to follow the list."
            for copy = (copy-picpocket-pic pic)
            do (setf (picpocket-pic-prev copy) :prev)
            collect copy))
+
+(defun picpocket-simplify-pos (pos)
+  (when pos
+    (make-picpocket-pos :current (picpocket-pic-file
+                                  (car (picpocket-pos-current pos)))
+                        :index (picpocket-pos-index pos)
+                        :filter-index (picpocket-pos-filter-index pos))))
 
 (defun picpocket-dump-list (&optional list)
   (pp (picpocket-simplify-list list)))
