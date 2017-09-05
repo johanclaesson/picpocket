@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; URL: https://github.com/johanclaesson/picpocket
-;; Version: 37
+;; Version: 38
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
