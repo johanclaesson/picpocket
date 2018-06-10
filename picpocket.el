@@ -4,7 +4,7 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; URL: https://github.com/johanclaesson/picpocket
-;; Version: 38
+;; Version: 39
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -305,7 +305,7 @@ This affects the commands `picpocket-scroll-some-*'."
 
 ;;; Internal variables
 
-(defconst picpocket-version 38)
+(defconst picpocket-version 39)
 (defconst picpocket-buffer "*picpocket*")
 (defconst picpocket-undo-buffer "*picpocket-undo*")
 
@@ -1025,7 +1025,9 @@ this frame and go back to the old frame."
       ;; Bury the picpocket buffer in the old frame.  This relieves
       ;; the display engine from updating that as well.  This is
       ;; important when the fullscreen frame have a different
-      ;; background-color or foreground-color.  These frame parameters
+      ;; background-color or foreground-color (see
+      ;; picpocket-frame-background-color and
+      ;; picpocket-frame-foreground-color).  These frame parameters
       ;; are considered during image cache lookup (see
       ;; image.c:search_image_cache).  Therefore each frame would have
       ;; it's own cache entry in the case where these colors differ.
@@ -1262,6 +1264,8 @@ When called from Lisp return the new picpocket buffer."
     (picpocket-do-revert)))
 
 (defun picpocket-do-revert ()
+  (when (display-graphic-p)
+    (clear-image-cache))
   ;; Selected-file is the second arg to all possible
   ;; picpocket-entry-functions.
   (apply picpocket-entry-function (append picpocket-entry-args
@@ -1527,10 +1531,25 @@ space-separated string."
   (interactive)
   (picpocket-command
     (let ((nr-or-file-name (completing-read "Jump to index or file-name: "
-                                            (picpocket-mapcar
-                                             'picpocket-file))))
+                                            (picpocket-jump-completions))))
       (or (picpocket-jump-to-index nr-or-file-name)
           (picpocket-jump-to-file nr-or-file-name)))))
+
+(defun picpocket-jump-completions ()
+  (append (picpocket-mapcar #'picpocket-file)
+          (if picpocket-filter-match-count-done
+              (picpocket-filter-matching-indexes)
+            (picpocket-all-indexes))))
+
+(defun picpocket-all-indexes ()
+  (cl-loop for i from 1 to picpocket-list-length
+           collect (number-to-string i)))
+
+(defun picpocket-filter-matching-indexes ()
+  (cl-loop for i from 1 to picpocket-list-length
+           for pic on picpocket-list
+           when (picpocket-filter-match-p pic)
+           collect (number-to-string i)))
 
 (defun picpocket-jump-to-index (string)
   (when (string-match "^[0-9]+$" string)

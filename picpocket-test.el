@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; URL: https://github.com/johanclaesson/picpocket
-;; Version: 38
+;; Version: 39
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -131,9 +131,9 @@ warm/red.svg"
            (indent defun))
   `(picpocket-with-test-dir
      (make-directory "cold")
-     (rename-file "blue.svg" "cold")
+     (rename-file "blue.svg" "cold/")
      (make-directory "warm")
-     (rename-file "red.svg" "warm")
+     (rename-file "red.svg" "warm/")
      ,@body))
 
 (defmacro picpocket-with-test-buffer-tree (&rest body)
@@ -519,7 +519,7 @@ warm/red.svg"
   (picpocket-with-test-dir-tree
     (unwind-protect (progn
                       (make-directory ".dot")
-                      (copy-file "green.svg" ".dot")
+                      (copy-file "green.svg" ".dot/")
                       (should (eq 3 (length (picpocket-file-list
                                              picpocket-test-dir)))))
       (delete-directory (concat picpocket-test-dir ".dot") t))))
