@@ -1,4 +1,3 @@
-#Picpocket
 
 
 Picpocket is an image viewer which requires GNU Emacs 24.4+
