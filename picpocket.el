@@ -4,7 +4,7 @@
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
 ;; URL: https://github.com/johanclaesson/picpocket
-;; Version: 39
+;; Version: 40
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -305,7 +305,7 @@ This affects the commands `picpocket-scroll-some-*'."
 
 ;;; Internal variables
 
-(defconst picpocket-version 39)
+(defconst picpocket-version 40)
 (defconst picpocket-buffer "*picpocket*")
 (defconst picpocket-undo-buffer "*picpocket-undo*")
 
@@ -325,10 +325,6 @@ This affects the commands `picpocket-scroll-some-*'."
 (defvar picpocket-entry-function nil)
 (defvar picpocket-entry-args nil)
 (defvar picpocket-filter nil)
-(defvar picpocket-filter-index nil)
-(defvar picpocket-compute-filter-index-from-scratch nil)
-(defvar picpocket-filter-match-count-done nil)
-(defvar picpocket-filter-match-count nil)
 (defvar picpocket-window-size nil
   "The current window size in pixels.
 This is kept for the benefit of the idle timer functions that do
@@ -336,7 +332,6 @@ not necessarily run with the picpocket window selected.")
 (defvar picpocket-header-text "")
 (defvar picpocket-demote-warnings nil)
 (defvar picpocket-sha1sum-executable nil)
-(defvar picpocket-debug-idle-timers nil)
 (defvar picpocket-old-keystroke-alist nil)
 (defvar picpocket-default-backdrop-commands
   '(("display" . "-window root")
@@ -357,14 +352,41 @@ not necessarily run with the picpocket window selected.")
 (defvar picpocket-old-fit nil)
 (defvar picpocket-last-frame-that-used-minibuffer nil)
 
+(defvar picpocket-idle-functions
+  '((picpocket-update-current-bytes 0.1)
+    (picpocket-maybe-save-journal 0.2)
+    (picpocket-look-ahead-next 0.2)
+    (picpocket-compute-filter-index 0.5 picpocket-pos-p)
+    (picpocket-compute-filter-match-count 1)
+    (picpocket-traverse-pic-list 3 picpocket-pic-list-p)
+    (picpocket-save-journal 60))
+  "List of functions to run in background when Emacs is idle.
+Elements in the list are lists of the form (WORK-FUNCTION
+INTERVAL STATE-PREDICATE).  STATE-PREDICATE is optional.
+WORK-FUNCTION is called with two arguments after INTERVAL seconds
+of idle time.  The arguments are DEADLINE-FUNCTION and STATE.  If
+it will do a lot of work the WORK-FUNCTION is supposed to
+periodically call DEADLINE-FUNCTION to check if it's time is up.
+DEADLINE-FUNCTION will return non-nil when it is time to stop.
+The return value from WORK-FUNCTION is supposed to be the new
+STATE.  And that will be passed as the second argument to
+WORK-FUNCTION at the next invocation.")
+;; PENDING (picpocket-look-ahead-more 2)
+;; PENDING (picpocket-update-header picpocket-update-header-seconds)))
+(defvar picpocket-timers nil)
+(defvar picpocket-inhibit-timers nil)
+(defvar picpocket-idle-f-deadline (seconds-to-time 0.2))
+(defvar picpocket-idle-f-pause (seconds-to-time 0.1))
+(defvar picpocket-idle-f-debug nil)
+(defvar picpocket-idle-f-header-info nil)
+
+
 
 ;; Variables displayed in the header-line must be marked as risky.
 (dolist (symbol '(picpocket-index
                   picpocket-list-length
                   picpocket-current
                   picpocket-filter
-                  picpocket-filter-index
-                  picpocket-filter-match-count
                   picpocket-header-text))
   (put symbol 'risky-local-variable t))
 
@@ -446,9 +468,12 @@ When there are no pictures in the list `picpocket-index' is zero.")
 (defsubst picpocket-set-rotation (pic value)
   (setf (picpocket-pic-rotation (picpocket-pic pic)) value))
 
+(defun picpocket-pic-list-p (pic)
+  (and (listp pic)
+       (picpocket-pic-p (car pic))))
+
 
 ;;; Macros
-
 
 (defmacro picpocket-command (&rest body)
   "Macro used in normal picpocket commands.
@@ -567,6 +592,8 @@ This mode is not used directly.  Other modes inherit from this mode."
 
 (define-derived-mode picpocket-mode picpocket-base-mode "picpocket"
   "Major mode for the main *picpocket* buffer."
+  ;; PENDING
+  ;; :after-hook (picpocket-update-keymap)
   (picpocket-db-init)
   (picpocket-db-compile-tags-for-completion)
   (setq header-line-format (when picpocket-header
@@ -715,7 +742,10 @@ This mode is not used directly.  Other modes inherit from this mode."
 (defun picpocket-files (files &optional selected-file)
   "View the list of image files in FILES starting with SELECTED-FILE."
   (setq picpocket-entry-function 'picpocket-files
-        picpocket-entry-args (list files))
+        picpocket-entry-args (list files)
+        files (cl-loop for file in files
+                       when (picpocket-picture-file-p file t)
+                       collect file))
   (picpocket-create-buffer files selected-file))
 
 ;;;###autoload
@@ -1108,27 +1138,37 @@ This hook make sure it is fitted to the picpocket frame."
           (picpocket-set-pos next)
         (picpocket-no-file "next")))))
 
-(defun picpocket-next-pos (&optional pos)
+(defun picpocket-next-pos (&optional pos silent)
   (unless pos
     (setq pos (picpocket-current-pos)))
-  (cl-loop for pic = (cdr (picpocket-pos-current pos)) then (cdr pic)
-           for index = (1+ (picpocket-pos-index pos)) then (1+ index)
-           while pic
-           when (picpocket-filter-match-p pic)
-           return
-           (make-picpocket-pos :current pic
-                               :index index
-                               :filter-index
-                               (when (picpocket-pos-filter-index pos)
-                                 (1+ (picpocket-pos-filter-index pos))))))
+  (let (printed)
+    (prog1
+        (cl-loop for pic = (cdr (picpocket-pos-current pos)) then (cdr pic)
+                 for index = (1+ (picpocket-pos-index pos)) then (1+ index)
+                 while pic
+                 when (picpocket-filter-match-p pic)
+                 return (make-picpocket-pos
+                         :current pic
+                         :index index
+                         :filter-index
+                         (when (picpocket-pos-filter-index pos)
+                           (1+ (picpocket-pos-filter-index pos))))
+                 with next-progress-index = (+ (picpocket-pos-index pos) 100)
+                 when (>= index next-progress-index)
+                 do (unless silent
+                      (setq printed t)
+                      (message "Searching at index %s..." index)
+                      (setq next-progress-index (+ next-progress-index 100))))
+      (when printed
+        (message nil)))))
 
 (defun picpocket-current-pos ()
   (make-picpocket-pos :current picpocket-current
                       :index picpocket-index
-                      :filter-index picpocket-filter-index))
+                      :filter-index (picpocket-filter-index)))
 
 (defun picpocket-next-pic ()
-  (picpocket-when-let (pos (picpocket-next-pos))
+  (picpocket-when-let (pos (picpocket-next-pos nil 'silent))
     (picpocket-pos-current pos)))
 
 (defun picpocket-previous ()
@@ -1141,20 +1181,32 @@ This hook make sure it is fitted to the picpocket frame."
         (picpocket-no-file "previous")))))
 
 (defun picpocket-previous-pic ()
-  (picpocket-when-let (pos (picpocket-previous-pos))
+  (picpocket-when-let (pos (picpocket-previous-pos 'silent))
     (picpocket-pos-current pos)))
 
-(defun picpocket-previous-pos ()
-  (cl-loop for pic = (picpocket-safe-prev picpocket-current)
-           then (picpocket-safe-prev pic)
-           for index = (1- picpocket-index) then (1- index)
-           while pic
-           when (picpocket-filter-match-p pic)
-           return (make-picpocket-pos :current pic
-                                      :index index
-                                      :filter-index
-                                      (when picpocket-filter-index
-                                        (1- picpocket-filter-index)))))
+(defun picpocket-previous-pos (&optional silent)
+  (let (printed)
+    (prog1
+        (cl-loop for pic = (picpocket-safe-prev picpocket-current)
+                 then (picpocket-safe-prev pic)
+                 for index = (1- picpocket-index)
+                 then (1- index)
+                 while pic
+                 when (picpocket-filter-match-p pic)
+                 return (make-picpocket-pos :current pic
+                                            :index index
+                                            :filter-index
+                                            (when (picpocket-filter-index)
+                                              (1- (picpocket-filter-index))))
+                 with next-progress-index = (- picpocket-index 100)
+                 when (<= index next-progress-index)
+                 do (unless silent
+                      (setq printed t)
+                      (message "Searching at index %s..." index)
+                      (setq next-progress-index (- next-progress-index 100))))
+      (when printed
+        (message nil)))))
+
 
 (defun picpocket-safe-prev (pic)
   (when pic
@@ -1407,11 +1459,38 @@ sign (-) then the tag is removed from all pictures instead."
         (picpocket-tag-to-all (or tags-string
                                   (picpocket-read-tag-for-all)))
       (picpocket-ensure-current-pic)
-      (let* ((old-tags-string (picpocket-tags-string-to-edit (picpocket-tags)))
+      (let* ((old-tags (picpocket-tags))
+             (old-tags-string (picpocket-tags-string-to-edit old-tags))
              (new-tags-string (or tags-string
                                   (picpocket-read-tags "Tags: "
-                                                       old-tags-string))))
-        (picpocket-action 'set-tags new-tags-string)))))
+                                                       old-tags-string)))
+             (tags-to-add (cl-set-difference
+                           (picpocket-tags-string-to-list new-tags-string)
+                           old-tags))
+             (hint (picpocket-key-hint tags-to-add)))
+        (picpocket-action 'set-tags new-tags-string)
+        (when hint
+          (picpocket-tags-message picpocket-current hint))))))
+
+(defun picpocket-key-hint (tags-to-add)
+  (let ((hints (cl-loop for (key _action arg) in (picpocket-keystroke-alist)
+                        when (and arg (memq (intern arg) tags-to-add))
+                        collect (format "`%s' -> tag %s"
+                                        (key-description
+                                         (picpocket-key-vector key))
+                                        arg))))
+    (when hints
+      (format "Keystroke hint%s: %s."
+              (picpocket-plural-s (length hints))
+              (string-join hints ", ")))))
+
+(defun picpocket-tags-message (pic &optional hint)
+  (if (picpocket-tags pic)
+      (message "Tags set to %s.  %s"
+               (picpocket-format-tags (picpocket-tags pic))
+               (or hint ""))
+    (message "Tags cleared.")))
+
 
 (defun picpocket-read-tag-for-all ()
   (picpocket-read-tags "Type tag to add to all files (-tag to remove): "))
@@ -1481,17 +1560,16 @@ space-separated string."
   (picpocket-reset-filter-counters))
 
 (defun picpocket-reset-filter-counters ()
-  (setq picpocket-filter-index nil
-        picpocket-compute-filter-index-from-scratch t
-        picpocket-filter-match-count nil
-        picpocket-filter-match-count-done nil))
+  (picpocket-idle-f-restart #'picpocket-compute-filter-index)
+  (picpocket-idle-f-restart #'picpocket-compute-filter-match-count))
 
 (defun picpocket-filter-match-p (pic)
-  (cl-subsetp (picpocket-remove-hyphens
-               picpocket-filter)
-              (picpocket-remove-hyphens
-               (append (picpocket-tags pic)
-                       (picpocket-extra-tags-for-filter pic)))))
+  (or (null picpocket-filter)
+      (cl-subsetp (picpocket-remove-hyphens
+                   picpocket-filter)
+                  (picpocket-remove-hyphens
+                   (append (picpocket-tags pic)
+                           (picpocket-extra-tags-for-filter pic))))))
 
 (defun picpocket-remove-hyphens (list-or-symbol)
   (cond ((not picpocket-filter-ignore-hyphens)
@@ -1535,11 +1613,17 @@ space-separated string."
       (or (picpocket-jump-to-index nr-or-file-name)
           (picpocket-jump-to-file nr-or-file-name)))))
 
+
 (defun picpocket-jump-completions ()
   (append (picpocket-mapcar #'picpocket-file)
-          (if picpocket-filter-match-count-done
+          (if (picpocket-filter-match-count)
               (picpocket-filter-matching-indexes)
             (picpocket-all-indexes))))
+
+(defun picpocket-mapcar (f)
+  (cl-loop for pic on picpocket-list
+           when (picpocket-filter-match-p pic)
+           collect (funcall f pic)))
 
 (defun picpocket-all-indexes ()
   (cl-loop for i from 1 to picpocket-list-length
@@ -1887,7 +1971,8 @@ The length scrolled is the width of the picture multiplied with
 
 (defun picpocket-reset ()
   (picpocket-reset-scroll)
-  (picpocket-list-reset))
+  (picpocket-list-reset)
+  (picpocket-idle-f-restart-all))
 
 (defun picpocket-set-pos (pos)
   (picpocket-reset-scroll)
@@ -1923,27 +2008,16 @@ The length scrolled is the width of the picture multiplied with
 (defun picpocket-list-reset ()
   (setq picpocket-list nil
         picpocket-list-length 0)
-  (picpocket-list-set-pos (make-picpocket-pos))
-  (picpocket-do-set-filter nil))
+  (picpocket-list-set-pos (make-picpocket-pos)))
 
 (defun picpocket-list-set-pos (pos)
   (let ((inhibit-quit t))
     (setq picpocket-current (picpocket-pos-current pos))
     (setq picpocket-index (or (picpocket-pos-index pos)
                               (picpocket-calculate-index picpocket-current)))
-    (setq picpocket-filter-index (picpocket-pos-filter-index pos))
-    (setq picpocket-compute-filter-index-from-scratch
-          (null picpocket-filter-index))))
-
-(defun picpocket-mapc (f)
-  (cl-loop for pic on picpocket-list
-           when (picpocket-filter-match-p pic)
-           do (funcall f pic)))
-
-(defun picpocket-mapcar (f)
-  (cl-loop for pic on picpocket-list
-           when (picpocket-filter-match-p pic)
-           collect (funcall f pic)))
+    (picpocket-set-filter-index (picpocket-pos-filter-index pos))
+    (unless (picpocket-filter-index)
+      (picpocket-idle-f-restart #'picpocket-compute-filter-index))))
 
 (defun picpocket-list-search (absfile)
   (cl-loop for pic on picpocket-list
@@ -1979,15 +2053,23 @@ The length scrolled is the width of the picture multiplied with
              (make-picpocket-pos :current (picpocket-prev pic)
                                  :index (1- picpocket-index))))
         (picpocket-reset)))
-    (and picpocket-filter
-         filter-match
-         (if picpocket-filter-match-count-done
-             (cl-decf picpocket-filter-match-count)
-           (setq picpocket-filter-match-count nil)))))
+    ;; The updating of filter count variables assumes that it is the
+    ;; current picture that is deleted.
+    (picpocket-idle-f-restart-all-unfinished)
+    (when (and picpocket-filter
+               filter-match)
+      (when (picpocket-filter-match-count)
+        (picpocket-set-filter-match-count (1- (picpocket-filter-match-count)))
+        ;; If it was the last matching pic that was deleted filter
+        ;; index should drop by one (to the value of
+        ;; picpocket-filter-match-count).
+        (when (picpocket-filter-index)
+          (picpocket-set-filter-index (min (picpocket-filter-index)
+                                           (picpocket-filter-match-count))))))))
 
 
 (defun picpocket-list-insert-after-current (p)
-  "Insert P after current pic."
+  "Insert P after current pic and make P current."
   (let ((inhibit-quit t)
         (prev picpocket-current)
         (next (cdr picpocket-current)))
@@ -2000,12 +2082,10 @@ The length scrolled is the width of the picture multiplied with
       (setq picpocket-list picpocket-current))
     (when next
       (picpocket-set-prev next picpocket-current))
-    (and picpocket-filter
-         (picpocket-filter-match-p picpocket-current)
-         (cl-incf picpocket-filter-match-count))))
+    (picpocket-idle-f-restart-all-filter-related)))
 
 (defun picpocket-list-insert-before-current (p)
-  "Insert P before current pic."
+  "Insert P before current pic and make P current."
   (let ((inhibit-quit t)
         (prev (and picpocket-current
                    (picpocket-prev picpocket-current)))
@@ -2019,9 +2099,7 @@ The length scrolled is the width of the picture multiplied with
       (setq picpocket-list picpocket-current))
     (when next
       (picpocket-set-prev next picpocket-current))
-    (and picpocket-filter
-         (picpocket-filter-match-p picpocket-current)
-         (cl-incf picpocket-filter-match-count))))
+    (picpocket-idle-f-restart-all-filter-related)))
 
 
 (defun picpocket-create-picpocket-list (files &optional selected-file)
@@ -2037,8 +2115,7 @@ The length scrolled is the width of the picture multiplied with
            do (setq prev pic))
   (setq picpocket-list-length (length picpocket-list))
   (picpocket-set-pos (or (and selected-file
-                              (string-match (picpocket-picture-regexp)
-                                            selected-file)
+                              (picpocket-picture-file-p selected-file t)
                               (cl-loop for pic on picpocket-list
                                        for index = 1 then (1+ index)
                                        when (equal selected-file
@@ -2048,6 +2125,21 @@ The length scrolled is the width of the picture multiplied with
                                                :index index)))
                          (make-picpocket-pos :current picpocket-list
                                              :index 1))))
+
+;; (defun picpocket-picture-file-p (file)
+;; (and (file-regular-p file)
+;; (string-match (picpocket-picture-regexp) file)))
+
+(defun picpocket-picture-file-p (file &optional verbose)
+  (cond ((not (file-regular-p file))
+         (when verbose
+           (message "Skipping %s which is not a regular file" file))
+         nil)
+        ((not (string-match (picpocket-picture-regexp) file))
+         (when verbose
+           (message "Skipping %s which is not a picture file" file))
+         nil)
+        (t t)))
 
 
 
@@ -2061,16 +2153,20 @@ The length scrolled is the width of the picture multiplied with
         (picpocket-file-list2 (directory-file-name (file-truename dir)))
       (message "Found %s pictures" picpocket-file-count))))
 
+
 (defun picpocket-file-list2 (dir)
+  (picpocket-file-list-debug "dir %s" dir)
   (push dir picpocket-done-dirs)
   (condition-case err
-      (let ((files (picpocket-sort-files (directory-files dir nil "[^.]" t)))
+      ;; Do not descend into dot directories.
+      (let ((files (picpocket-sort-files (directory-files dir nil "^[^.]" t)))
             absfile pic-files sub-files subdirs)
+        (picpocket-file-list-debug "  files %s" files)
         (dolist (file files)
           (setq absfile (expand-file-name file dir))
           (if (file-directory-p absfile)
               (push absfile subdirs)
-            (when (string-match (picpocket-picture-regexp) file)
+            (when (picpocket-picture-file-p absfile)
               (push absfile pic-files)
               (when (zerop (% (cl-incf picpocket-file-count) 100))
                 (message "Found %s pictures so far%s"
@@ -2081,11 +2177,16 @@ The length scrolled is the width of the picture multiplied with
         (setq pic-files (nreverse pic-files))
         (when picpocket-recursive
           (dolist (subdir subdirs)
+            (picpocket-file-list-debug "  subdir %s" subdir)
+            (picpocket-file-list-debug "         %s" (expand-file-name subdir))
+            (picpocket-file-list-debug "    from %s" dir)
             (when (or picpocket-follow-symlinks
                       (not (file-symlink-p subdir)))
               (let ((true-subdir (directory-file-name
                                   (file-truename subdir))))
                 (unless (or (picpocket-dot-file-p subdir)
+                            ;; Do not follow links to the root.
+                            (string-equal "/" true-subdir)
                             (member true-subdir picpocket-done-dirs))
                   (setq sub-files (append (picpocket-file-list2 true-subdir)
                                           sub-files)))))))
@@ -2094,9 +2195,18 @@ The length scrolled is the width of the picture multiplied with
                   (warn "Failed to access %s (%s)" dir err)
                   nil))))
 
+(defvar picpocket-file-list-debug nil)
+(defun picpocket-file-list-debug (format &rest args)
+  (when picpocket-file-list-debug
+    (apply #'message format args)))
+
+
+
 (defun picpocket-sort-files (files)
   (sort files #'picpocket-file-name-lessp))
 
+;; PENDING Replace picpocket-file-name-lessp with string-version-lessp
+;; when Emacs 26 is mainstream.
 (defun picpocket-file-name-lessp (a b)
   (cond ((and (equal "" a)
               (not (equal "" b)))
@@ -2152,7 +2262,8 @@ The length scrolled is the width of the picture multiplied with
 ;; database below.
 
 (defun picpocket-tags (&optional pic)
-  (picpocket-db-tags (picpocket-sha-force pic)))
+  (unless (zerop (picpocket-db-count))
+    (picpocket-db-tags (picpocket-sha-force pic))))
 
 (defun picpocket-tags-set (pic new-tags)
   (let ((match-before (picpocket-filter-match-p pic)))
@@ -2161,12 +2272,11 @@ The length scrolled is the width of the picture multiplied with
                            new-tags)
     (let ((match-after (picpocket-filter-match-p pic)))
       (when (picpocket-xor match-before match-after)
-        (setq picpocket-compute-filter-index-from-scratch t
-              picpocket-filter-index nil)
-        (if picpocket-filter-match-count-done
-            (cl-incf picpocket-filter-match-count (if match-after 1 -1))
-          (setq picpocket-filter-match-count nil
-                picpocket-filter-match-count-done nil))))))
+        (picpocket-idle-f-restart #'picpocket-compute-filter-index)
+        (if (picpocket-filter-match-count)
+            (picpocket-set-filter-match-count (+ (picpocket-filter-match-count)
+                                                 (if match-after 1 -1)))
+          (picpocket-idle-f-restart #'picpocket-compute-filter-match-count))))))
 
 (defun picpocket-xor (a b)
   (not (eq (not a) (not b))))
@@ -2789,177 +2899,312 @@ will end up replacing the deleted text."
 
 ;;; Idle timer functions
 
-(defvar picpocket-timers nil)
-(defvar picpocket-idle-timer-work-functions
-  '((picpocket-update-current-bytes 0.1)
-    (picpocket-maybe-save-journal 0.2)
-    (picpocket-look-ahead-next 0.2)
-    ;; PENDING
-    ;; (picpocket-look-ahead-more 2)
-    (picpocket-compute-filter-index 0.5)
-    (picpocket-compute-filter-match-count 1)
-    (picpocket-traverse-pic-list 3)
-    (picpocket-save-journal 60)))
-;; (picpocket-update-header picpocket-update-header-seconds)))
-(defvar picpocket-inhibit-timers nil)
-(defvar picpocket-idle-timer-deadline 0.1)
+
+;; The following measures how long time the time comparison in the
+;; deadline function takes.  It estimates how expensive it is to
+;; restart unfinished idle functions.
+
+;; 1000000 3400ms
+;; 100000  340ms
+;; 10000   13ms (+130ms sometimes (gc i suppose))
+
+;; (picpocket-time-string
+;; (let ((start (current-time)))
+;; (dotimes (i 1000000)
+;; (time-less-p picpocket-idle-f-deadline
+;; (time-subtract (current-time) start)))))
+;; (garbage-collect)
 
 
+(defun picpocket-set-idle-f-state (f state)
+  (put f 'picpocket-state state))
+
+(defun picpocket-idle-f-state (f)
+  (get f 'picpocket-state))
+
+(defun picpocket-set-idle-f-result (f result)
+  (put f 'picpocket-result result))
+
+(defun picpocket-idle-f-result (f)
+  (get f 'picpocket-result))
+
+(defun picpocket-set-idle-f-resume-timer (f resume-timer)
+  (put f 'picpocket-resume-timer resume-timer))
+
+(defun picpocket-idle-f-resume-timer (f)
+  (get f 'picpocket-resume-timer))
+
+
+(defun picpocket-idle-f-restart-all ()
+  (cl-loop for (f . _) in picpocket-idle-functions
+           do (picpocket-idle-f-restart f)))
+
+(defun picpocket-idle-f-restart (f)
+  (unless (assq f picpocket-idle-functions)
+    (error "Invalid argument to picpocket-idle-f-restart (%s)" f))
+  (picpocket-set-idle-f-state f nil)
+  (picpocket-set-idle-f-result f nil))
+
+(defun picpocket-idle-f-restart-all-unfinished ()
+  (cl-loop for (f . _) in picpocket-idle-functions
+           do (picpocket-idle-f-restart-unfinished f)))
+
+;; Unfinished is here defined as state not being the symbol done.
+(defun picpocket-idle-f-restart-unfinished (f)
+  (unless (eq 'done (picpocket-idle-f-state f))
+    (picpocket-idle-f-restart f)))
+
+(defun picpocket-idle-f-restart-all-filter-related ()
+  (picpocket-idle-f-restart #'picpocket-compute-filter-index)
+  (picpocket-idle-f-restart #'picpocket-compute-filter-match-count))
+
+
+
+(defun picpocket-idle-functions ()
+  (cl-loop for (f . _) in picpocket-idle-functions
+           collect f))
 
 
 (defun picpocket-init-timers ()
   (picpocket-cancel-timers)
+  (picpocket-idle-f-restart-all)
   (unless picpocket-inhibit-timers
     (add-hook 'kill-buffer-hook #'picpocket-cancel-timers nil t)
-    (setq picpocket-timers
-          (cl-loop for (f s) in picpocket-idle-timer-work-functions
-                   for sec = (if (functionp s)
-                                 (funcall s)
-                               s)
-                   collect (run-with-idle-timer sec
-                                                t
-                                                #'picpocket-run-idle-timer
-                                                f)))))
+    (let ((inhibit-quit t))
+      (setq picpocket-timers
+            (cl-loop for (f s _p) in picpocket-idle-functions
+                     for sec = (if (functionp s)
+                                   (funcall s)
+                                 s)
+                     collect (run-with-idle-timer sec
+                                                  t
+                                                  #'picpocket-run-idle-f
+                                                  f))))))
 
 (defun picpocket-cancel-timers ()
   (dolist (timer picpocket-timers)
     (cancel-timer timer))
   (setq picpocket-timers nil)
-  (dolist (ft picpocket-idle-timer-work-functions)
-    (let* ((f (car ft))
-           (resume-timer (get f 'picpocket-resume-timer)))
-      (when resume-timer
-        (cancel-timer resume-timer)))))
+  (dolist (f (picpocket-idle-functions))
+    (picpocket-cancel-resume-timer f)))
+
+(defun picpocket-cancel-resume-timer (f)
+  (let ((resume-timer (picpocket-idle-f-resume-timer f)))
+    (when resume-timer
+      (picpocket-set-idle-f-resume-timer f nil)
+      (cancel-timer resume-timer))))
 
 
-(defun picpocket-run-idle-timer (f &optional state)
-  (let ((debug-on-error picpocket-debug-idle-timers)
-        (resume-timer (get f 'picpocket-resume-timer))
-        (buffer (get-buffer picpocket-buffer)))
-    (when (timerp resume-timer)
-      (cancel-timer resume-timer))
+(defun picpocket-run-idle-f (f)
+  (let ((debug-on-error picpocket-idle-f-debug)
+        (buffer (get-buffer picpocket-buffer))
+        (state (get f 'picpocket-state))
+        (state-predicate (cl-caddr (assq f picpocket-idle-functions))))
+    (picpocket-cancel-resume-timer f)
+    (or (null state)
+        (eq state 'done)
+        (null state-predicate)
+        (funcall state-predicate state)
+        (error "%s: invalid state %s" f state))
     (cond (picpocket-inhibit-timers
            (picpocket-cancel-timers))
           (buffer
            (with-current-buffer buffer
-             (picpocket-run-idle-timer-in-buffer f state)))
+             (picpocket-run-idle-f-in-buffer f state)))
           (t (picpocket-cancel-timers)))))
 
-(defun picpocket-run-idle-timer-in-buffer (f state)
+(defun picpocket-run-idle-f-in-buffer (f state)
   (cond ((null picpocket-list)
          (picpocket-cancel-timers))
         ((null picpocket-db)
          (message "Cancel idle timers since picpocket-db is nil.")
          (picpocket-cancel-timers))
         ((not (file-directory-p default-directory))
-         (message "Closing picpocket buffer since %s do not exist any more."
+         (message "Closing picpocket buffer since %s does not exist any more."
                   default-directory)
          (kill-buffer picpocket-buffer)
          (picpocket-cancel-timers))
+        ((eq state 'done)
+         (when picpocket-idle-f-debug
+           (message "picpocket idle f %s already done" f)))
         (t
          (condition-case err
-             (funcall f (picpocket-make-deadline-function f) state)
-           (quit (message "picpocket-run-idle-timer %s interrupted by quit" f)
+             (progn
+               (setq state (funcall f (picpocket-make-deadline-function) state))
+               (picpocket-set-idle-f-state f state)
+               (when (and state
+                          (not (eq state 'done)))
+                 (picpocket-set-idle-f-resume-timer
+                  f
+                  (run-with-idle-timer (time-add (or (current-idle-time)
+                                                     (seconds-to-time 0))
+                                                 picpocket-idle-f-pause)
+                                       nil
+                                       #'picpocket-run-idle-f
+                                       f))))
+           (quit (message "picpocket-run-idle-f %s interrupted by quit"
+                          f)
                  (signal (car err) (cdr err)))))))
 
-(defun picpocket-make-deadline-function (f)
+(defun picpocket-make-deadline-function ()
   (let ((start (current-time)))
-    (lambda (state)
-      (when (time-less-p (seconds-to-time picpocket-idle-timer-deadline)
-                         (time-subtract (current-time) start))
-        (put f
-             'picpocket-resume-timer
-             (run-with-idle-timer (time-add (or (current-idle-time)
-                                                (seconds-to-time 0))
-                                            (seconds-to-time
-                                             picpocket-idle-timer-deadline))
-                                  nil
-                                  #'picpocket-run-idle-timer
-                                  f
-                                  state))))))
+    (lambda ()
+      (time-less-p picpocket-idle-f-deadline
+                   (time-subtract (current-time) start)))))
 
 
 (defun picpocket-traverse-pic-list (deadline-function state)
-  (with-current-buffer picpocket-buffer
-    (cl-loop for pic on (picpocket-continue-or-start-over state)
-             do (picpocket-ensure-cache pic)
-             until (funcall deadline-function pic))
-    ;; picpocket-size-force may push out the very next pic from the
-    ;; emacs image cache.  Call picpocket-look-ahead-next to put it back if
-    ;; needed.
-    (picpocket-look-ahead-next)))
+  (cl-loop for pic on (or state picpocket-list)
+           for i = 1 then (1+ i)
+           do (picpocket-ensure-cache pic)
+           when (null (cdr pic))
+           return (progn
+                    (when picpocket-idle-f-debug
+                      (message "picpocket-traverse-pic-list is done (i %s)" i))
+                    'done)
+           when (funcall deadline-function)
+           return (progn
+                    (when picpocket-idle-f-debug
+                      (message "picpocket-traverse-pic-list travsersed %s" i))
+                    (cdr pic))))
 
+;; Do not call picpocket-size-force here since it eats a lot of memory
+;; and cpu for very little use.  (Also it may push out the very next
+;; pic from the emacs image cache.  So if it was called then
+;; picpocket-traverse-pic-list should call picpocket-look-ahead-next
+;; after the loop to put it back if needed.)
 (defun picpocket-ensure-cache (pic)
   (when (file-exists-p (picpocket-absfile pic))
-    (picpocket-sha-force pic)
-    ;; picpocket-size-force eats a lot of memory and cpu when the pic
-    ;; list is long.  For very little use.
-    ;; (picpocket-size-force pic)
+    ;; If the user have no saved tags there is no reason to compute sha.
+    (unless (zerop (picpocket-db-count))
+      (picpocket-sha-force pic))
     (picpocket-bytes-force pic)))
 
-(defun picpocket-continue-or-start-over (state)
-  "Continue from saved STATE or start from scratch if STATE is invalid.
-STATE is the last pic the idle timer worked on.  If that for
-example have been deleted from the picture list then the state is
-considered invalid and we start from the beginning again."
-  (or (and state
-           (memq state picpocket-list))
-      picpocket-list))
 
+;; STATE is (COUNT . PIC).  Done when list is traversed.  Then the
+;; total count is stored as the result and the state will be the
+;; symbol done.
 (defun picpocket-compute-filter-match-count (deadline-function state)
-  (with-current-buffer picpocket-buffer
-    (unless picpocket-filter-match-count
-      (setq picpocket-filter-match-count-done nil))
-    (when (and picpocket-filter
-               (not picpocket-filter-match-count-done))
-      (when (or (null picpocket-filter-match-count)
-                (and state
-                     (not (memq state picpocket-list))))
-        (setq state picpocket-list
-              picpocket-filter-match-count 0))
-      (unless (cl-loop for pic on state
-                       do (when (picpocket-filter-match-p pic)
-                            (cl-incf picpocket-filter-match-count))
-                       when (funcall deadline-function pic)
-                       return t)
-        (setq picpocket-filter-match-count-done t)))))
+  (when picpocket-idle-f-debug
+    (if (consp state)
+        (message "picpocket-compute-filter-match-count count %s left %s"
+                 (car state) (length (cdr state)))
+      (message "picpocket-compute-filter-match-count state %s"
+               state)))
+  (when picpocket-filter
+    (let* ((state (or state (cons 0 picpocket-list)))
+           (count (car state))
+           (state-pic (cdr state)))
+      (cl-loop for pic on state-pic
+               for i = 1 then (1+ i)
+               do (when (picpocket-filter-match-p pic)
+                    (cl-incf count))
+               when (null (cdr pic))
+               return (progn
+                        (picpocket-set-filter-match-count count)
+                        (when picpocket-idle-f-debug
+                          (message "picpocket-compute-filter-match-count done"))
+                        'done)
+               when (funcall deadline-function)
+               return (progn
+                        (when picpocket-idle-f-debug
+                          (message "picpocket-compute-filter-match-count i %s"
+                                   i))
+                        (cons count (cdr pic)))))))
 
+(defun picpocket-filter-match-count ()
+  (picpocket-idle-f-result #'picpocket-compute-filter-match-count))
+
+(defun picpocket-set-filter-match-count (count)
+  (picpocket-set-idle-f-result #'picpocket-compute-filter-match-count count))
+
+(defun picpocket-no-matching-pictures-p ()
+  (and (picpocket-filter-match-count)
+       (zerop (picpocket-filter-match-count))))
+
+
+;; STATE is a picpocket-pos struct.  Done when the correct index is
+;; found which is then stored as result.  State is then the symbol
+;; done.  If the user is going backwards in the list there is a small
+;; risk that this traversing loop will miss and go to the end of the
+;; list without finding the index.  Then it will return nil and so it
+;; will restart.
 (defun picpocket-compute-filter-index (deadline-function state)
-  (with-current-buffer picpocket-buffer
-    (when (and picpocket-filter
-               (null picpocket-filter-index))
-      (when (or (null state)
-                picpocket-compute-filter-index-from-scratch
-                (not (memq state picpocket-list)))
-        (setq state (picpocket-first-pos)))
-      (cl-loop for pos = state then (picpocket-next-pos pos)
-               while pos
-               when (eq (picpocket-pos-current pos) picpocket-current)
-               return (setq picpocket-filter-index
-                            (picpocket-pos-filter-index pos))
-               until (funcall deadline-function pos)))))
+  (when (and picpocket-filter
+             (not (picpocket-no-matching-pictures-p)))
+    (setq state (or state (picpocket-first-pos)))
+    (cl-loop for pos = state then (picpocket-next-pos pos 'silent)
+             for i = 1 then (1+ i)
+             when (and pos
+                       (eq (picpocket-pos-current pos) picpocket-current))
+             return (progn
+                      (picpocket-set-filter-index
+                       (picpocket-pos-filter-index pos))
+                      (when picpocket-idle-f-debug
+                        (message "picpocket-compute-filter-index done"))
+                      'done)
+             when (funcall deadline-function)
+             return (progn
+                      (when picpocket-idle-f-debug
+                        (message "picpocket-compute-filter-index i %s" i))
+                      pos))))
+
+(defun picpocket-filter-index ()
+  (picpocket-idle-f-result #'picpocket-compute-filter-index))
+
+(defun picpocket-set-filter-index (index)
+  (picpocket-set-idle-f-result #'picpocket-compute-filter-index index))
+
+(defun picpocket-idle-f-info ()
+  (let* ((state-index (picpocket-idle-f-state
+                       #'picpocket-compute-filter-index))
+         (state-count (picpocket-idle-f-state
+                       #'picpocket-compute-filter-match-count))
+         (state-traverse (picpocket-idle-f-state
+                          #'picpocket-traverse-pic-list))
+         (index (if (picpocket-pos-p state-index)
+                    (length (picpocket-pos-current state-index))
+                  state-index))
+         (count (if (consp state-count)
+                    (format "(%s (left %s))"
+                            (car state-count)
+                            (length (cdr state-count)))
+                  state-count))
+         (traverse (if (listp state-traverse)
+                       (length state-traverse)
+                     state-traverse)))
+    (format "{%s / %s %s}" index count traverse)))
+
 
 
 (defun picpocket-update-current-bytes (&rest ignored)
   (let ((bytes (picpocket-bytes)))
     (picpocket-bytes-force picpocket-current)
     (unless bytes
-      (force-mode-line-update))))
+      (force-mode-line-update)))
+  nil)
 
 (defun picpocket-maybe-save-journal (&rest ignored)
   (when (> (picpocket-db-journal-size) 100)
-    (picpocket-db-save)))
+    (picpocket-db-save))
+  nil)
 
 (defun picpocket-save-journal (&rest ignored)
   (unless (zerop (picpocket-db-journal-size))
-    (picpocket-db-save)))
+    (picpocket-db-save))
+  nil)
 
 (defun picpocket-look-ahead-next (&rest ignored)
-  (let ((pic (or (picpocket-next-pic) (picpocket-previous-pic))))
-    (when (and pic
-               (not (eq pic picpocket-last-look-ahead)))
-      (picpocket-look-ahead-and-save-time pic)
-      (setq picpocket-last-look-ahead pic))))
+  ;; Skip this when there is a filter.  With a filter this operation
+  ;; could potentially take a very long time.  And it currently do not
+  ;; care about any deadlines.
+  (unless picpocket-filter
+    (let ((pic (or (picpocket-next-pic) (picpocket-previous-pic))))
+      (when (and pic
+                 (not (eq pic picpocket-last-look-ahead)))
+        (picpocket-look-ahead-and-save-time pic)
+        (setq picpocket-last-look-ahead pic))))
+  nil)
 
 
 (defun picpocket-look-ahead-more (deadline-function ignored)
@@ -2970,7 +3215,7 @@ considered invalid and we start from the beginning again."
 (defun picpocket-look-ahead-more2 (deadline-function)
   (cl-loop for pic on picpocket-current
            for count = 0 then (1+ count)
-           until (funcall deadline-function nil)
+           until (funcall deadline-function)
            finally return count
            repeat picpocket-look-ahead-max
            do (picpocket-look-ahead-and-save-time pic)))
@@ -3670,10 +3915,7 @@ the delete action, though)."
   (pcase action
     (`set-tags
      (picpocket-set-tags-action arg pic)
-     (if (picpocket-tags pic)
-         (message "Tags set to %s." (picpocket-format-tags
-                                     (picpocket-tags pic)))
-       (message "Tags cleared")))
+     (picpocket-tags-message pic))
     (`add-tag
      (picpocket-add-tag-action arg pic)
      (message "%s is tagged with %s." (picpocket-file pic) arg))
@@ -3690,6 +3932,7 @@ the delete action, though)."
      (picpocket-file-action action arg pic))
     (_
      (error "Unknown action %s %s" action arg))))
+
 
 (defvar picpocket-undo-fail nil)
 (defvar picpocket-undo-ok nil)
@@ -3751,6 +3994,7 @@ the delete action, though)."
                              :file (picpocket-absfile pic)
                              :tags (picpocket-tags pic)
                              :trash-file trash-file)
+    (picpocket-sha-force pic)
     (rename-file file trash-file)
     (picpocket-tags-delete-file pic file)
     (picpocket-list-delete pic (list filter-match))))
@@ -3944,6 +4188,7 @@ the delete action, though)."
                              :to-file new-absfile
                              :trash-file trash-file
                              :sha (picpocket-sha-force pic))
+    (picpocket-sha-force pic)
     (rename-file old-absfile new-absfile t)
     (picpocket-tags-move-file pic old-absfile new-absfile)
     (cond ((or (eq action 'move)
@@ -4502,7 +4747,6 @@ This command picks the first undoable command in that list."
       (picpocket-fullscreen-header-line)
     (picpocket-header-pic-info)))
 
-
 (defun picpocket-fullscreen-header-line ()
   (concat (picpocket-header-pic-info)
           (let ((msg (picpocket-escape-percent (current-message))))
@@ -4590,7 +4834,9 @@ This command picks the first undoable command in that list."
                        (picpocket-rotation-info)
                        (picpocket-format-tags (picpocket-tags
                                                picpocket-current))
-                       (picpocket-filter-info))))
+                       (picpocket-filter-info)
+                       (when picpocket-idle-f-header-info
+                         (picpocket-idle-f-info)))))
 
 (defun picpocket-join (&rest strings)
   (mapconcat 'identity
@@ -4660,16 +4906,8 @@ This command picks the first undoable command in that list."
   (when picpocket-filter
     (format "[filter: %s %s/%s]"
             (picpocket-format-tags picpocket-filter)
-            (or picpocket-filter-index "?")
-            (cond (picpocket-filter-match-count-done
-                   picpocket-filter-match-count)
-                  ((null picpocket-filter-match-count)
-                   "?")
-                  ((zerop picpocket-filter-match-count)
-                   "?")
-                  (t
-                   (format "%s+" picpocket-filter-match-count))))))
-
+            (or (picpocket-filter-index) "?")
+            (or (picpocket-filter-match-count) "?"))))
 
 ;;; Hook functions
 
@@ -4763,8 +5001,6 @@ This command picks the first undoable command in that list."
     (picpocket-dump-var 'picpocket-index)
     (picpocket-dump-var 'picpocket-list-length)
     (picpocket-dump-var 'picpocket-filter)
-    (picpocket-dump-var 'picpocket-filter-index)
-    (picpocket-dump-var 'picpocket-filter-match-count)
     (picpocket-dump-var 'picpocket-fatal)
     (picpocket-dump-var 'picpocket-recursive)
     (picpocket-dump-var 'picpocket-version)
@@ -4772,15 +5008,15 @@ This command picks the first undoable command in that list."
     (picpocket-dump-var 'picpocket-entry-args)
     (picpocket-dump-var 'picpocket-picture-regexp)
     (picpocket-dump-var 'image-type-file-name-regexps)
-    (picpocket-dump-some "current-pos"
+    (picpocket-dump-some "pp-current-pos"
                          (picpocket-simplify-pos (picpocket-current-pos)))
-    (picpocket-dump-some "next-pos"
+    (picpocket-dump-some "pp-next-pos"
                          (picpocket-simplify-pos (picpocket-next-pos)))
-    (picpocket-dump-some "prev-pos"
+    (picpocket-dump-some "pp-prev-pos"
                          (picpocket-simplify-pos (picpocket-previous-pos)))
     (picpocket-dump-some "dir-files"
-                         (directory-files default-directory nil "[^.]" t))
-    (picpocket-dump-some "p-file-list"
+                         (directory-files default-directory nil "^[^.]" t))
+    (picpocket-dump-some "pp-file-list"
                          (picpocket-file-list default-directory))
     (switch-to-buffer picpocket-dump-buffer)))
 
@@ -4813,11 +5049,12 @@ With the prev links it is harder to follow the list."
            collect copy))
 
 (defun picpocket-simplify-pos (pos)
-  (when pos
-    (make-picpocket-pos :current (picpocket-pic-file
-                                  (car (picpocket-pos-current pos)))
-                        :index (picpocket-pos-index pos)
-                        :filter-index (picpocket-pos-filter-index pos))))
+  (and pos
+       (picpocket-pos-current pos)
+       (make-picpocket-pos :current (picpocket-pic-file
+                                     (car (picpocket-pos-current pos)))
+                           :index (picpocket-pos-index pos)
+                           :filter-index (picpocket-pos-filter-index pos))))
 
 (defun picpocket-dump-list (&optional list)
   (pp (picpocket-simplify-list list)))

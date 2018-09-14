@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanclaesson@bredband.net>
 ;; URL: https://github.com/johanclaesson/picpocket
-;; Version: 39
+;; Version: 40
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -95,6 +95,7 @@
           (picpocket-undo-ring nil)
           (picpocket-trashcan nil)
           (default-directory picpocket-test-dir))
+     (picpocket-do-set-filter nil)
      (get-buffer-create picpocket-undo-buffer)
      (make-directory picpocket-test-dir t)
      (unwind-protect
@@ -826,17 +827,16 @@ warm/red.svg"
 
 (ert-deftest picpocket-test-compute-filter-match-count ()
   (picpocket-with-test-buffer
-    (should-not picpocket-filter-match-count-done)
-    (should-not picpocket-filter-match-count)
+    (should-not (picpocket-filter-match-count))
     ;; No filter.
-    (picpocket-compute-filter-match-count #'ignore nil)
-    (should-not picpocket-filter-match-count-done)
-    (should-not picpocket-filter-match-count)
+    (picpocket-fake-compute-filter-match-count)
+    (should-not (picpocket-filter-match-count))
     ;; No matches.
     (picpocket-set-filter "orc")
-    (picpocket-compute-filter-match-count #'ignore nil)
-    (should picpocket-filter-match-count-done)
-    (should (zerop picpocket-filter-match-count))
+    (picpocket-fake-compute-filter-match-count)
+    (should (zerop (picpocket-filter-match-count)))
+    (should (eq (picpocket-idle-f-state #'picpocket-compute-filter-match-count)
+                'done))
     ;; Two matches.
     (picpocket-set-filter "")
     (picpocket-edit-tags nil "green orc maniac")
@@ -844,19 +844,21 @@ warm/red.svg"
     (picpocket-edit-tags nil "orc")
     (picpocket-previous)
     (picpocket-set-filter "orc")
-    (picpocket-compute-filter-match-count #'ignore nil)
-    (should picpocket-filter-match-count-done)
-    (should (eq 2 picpocket-filter-match-count))
+    (picpocket-fake-compute-filter-match-count)
+    (should (eq (picpocket-idle-f-state #'picpocket-compute-filter-match-count)
+                'done))
+    (should (eq 2 (picpocket-filter-match-count)))
     ;; Force rescan.
     (picpocket-set-filter "orc")
-    (picpocket-compute-filter-match-count #'ignore nil)
-    (should picpocket-filter-match-count-done)
-    (should (eq 2 picpocket-filter-match-count))
+    (picpocket-fake-compute-filter-match-count)
+    (should (eq (picpocket-idle-f-state #'picpocket-compute-filter-match-count)
+                'done))
+    (should (eq 2 (picpocket-filter-match-count)))
     ;; Alter tags.
     (picpocket-edit-tags nil "troll berserk")
-    (should (eq 1 picpocket-filter-match-count))
+    (should (eq 1 (picpocket-filter-match-count)))
     (picpocket-edit-tags nil "vampire duke")
-    (should (zerop picpocket-filter-match-count))
+    (should (zerop (picpocket-filter-match-count)))
     ;; Delete file.
     (picpocket-set-filter "")
     (picpocket-home)
@@ -864,22 +866,29 @@ warm/red.svg"
     (picpocket-next)
     (picpocket-edit-tags nil "orc minion")
     (picpocket-set-filter "orc")
-    (picpocket-compute-filter-match-count #'ignore nil)
-    (should (eq 2 picpocket-filter-match-count))
+    (picpocket-fake-compute-filter-match-count)
+    (should (eq 2 (picpocket-filter-match-count)))
     (picpocket-delete-file)
-    (should picpocket-filter-match-count-done)
-    (should (eq 1 picpocket-filter-match-count))
+    (should (eq 1 (picpocket-filter-match-count)))
     (picpocket-delete-file)
-    (should picpocket-filter-match-count-done)
-    (should (zerop picpocket-filter-match-count))))
+    (should (zerop (picpocket-filter-match-count)))))
+
+(defun picpocket-fake-compute-filter-match-count ()
+  (picpocket-fake-run-idle-f #'picpocket-compute-filter-match-count))
+
+(defun picpocket-fake-run-idle-f (f)
+  (with-current-buffer picpocket-buffer
+    (picpocket-set-idle-f-state f (funcall f #'ignore nil))))
+
+
 
 (ert-deftest picpocket-test-compute-filter-index ()
   (picpocket-with-test-buffer
-    (should-not picpocket-filter-index)
+    (should-not (picpocket-filter-index))
     (picpocket-set-filter "orc")
     ;; No matches.
-    (picpocket-compute-filter-index #'ignore nil)
-    (should (zerop picpocket-filter-index))
+    (picpocket-fake-compute-filter-index)
+    (should (zerop (picpocket-filter-index)))
     ;; Two matches.
     (picpocket-set-filter "")
     (picpocket-edit-tags nil "green orc maniac")
@@ -887,19 +896,19 @@ warm/red.svg"
     (picpocket-edit-tags nil "orc")
     (picpocket-home)
     (picpocket-set-filter "orc")
-    (picpocket-compute-filter-index #'ignore nil)
-    (should (eq 1 picpocket-filter-index))
+    (picpocket-fake-compute-filter-index)
+    (should (eq 1 (picpocket-filter-index)))
     (picpocket-next)
-    (should (eq 2 picpocket-filter-index))
+    (should (eq 2 (picpocket-filter-index)))
     ;; Force rescan.
     (picpocket-set-filter "orc")
-    (picpocket-compute-filter-index #'ignore nil)
-    (should (eq 2 picpocket-filter-index))
+    (picpocket-fake-compute-filter-index)
+    (should (eq 2 (picpocket-filter-index)))
     ;; Alter tags.
     (picpocket-edit-tags nil "troll berserk")
-    (should-not picpocket-filter-index)
-    (picpocket-compute-filter-index #'ignore nil)
-    (should (eq 1 picpocket-filter-index))
+    (should-not (picpocket-filter-index))
+    (picpocket-fake-compute-filter-index)
+    (should (eq 1 (picpocket-filter-index)))
     ;; Delete.
     (picpocket-set-filter "")
     (picpocket-home)
@@ -907,16 +916,19 @@ warm/red.svg"
     (picpocket-next)
     (picpocket-edit-tags nil "orc minion")
     (picpocket-set-filter "orc")
-    (picpocket-compute-filter-index #'ignore nil)
-    (should (eq 2 picpocket-filter-index))
+    (picpocket-fake-compute-filter-index)
+    (should (eq 2 (picpocket-filter-index)))
     (picpocket-delete-file)
-    (should-not picpocket-filter-index)
-    (picpocket-compute-filter-index #'ignore nil)
-    (should (eq 1 picpocket-filter-index))
+    (should-not (picpocket-filter-index))
+    (picpocket-fake-compute-filter-index)
+    (should (eq 1 (picpocket-filter-index)))
     (picpocket-delete-file)
-    (should-not picpocket-filter-index)
-    (picpocket-compute-filter-index #'ignore nil)
-    (should (zerop picpocket-filter-index))))
+    (should-not (picpocket-filter-index))
+    (picpocket-fake-compute-filter-index)
+    (should (zerop (picpocket-filter-index)))))
+
+(defun picpocket-fake-compute-filter-index ()
+  (picpocket-fake-run-idle-f #'picpocket-compute-filter-index))
 
 (ert-deftest picpocket-empty-undo-buffer-test ()
   :tags '(:picpocket)
