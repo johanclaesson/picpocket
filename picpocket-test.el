@@ -1,9 +1,9 @@
 ;;; picpocket-test.el --- Tests -*- lexical-binding: t; coding: utf-8-unix -*-
 
 ;; Copyright (C) 2017 Johan Claesson
-;; Author: Johan Claesson <johanclaesson@bredband.net>
+;; Author: Johan Claesson <johanwclaesson@gmail.com>
 ;; URL: https://github.com/johanclaesson/picpocket
-;; Version: 40
+;; Version: 41
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -76,7 +76,6 @@
 
 ;;; Macros
 
-
 (defmacro picpocket-with-test-dir (&rest body)
   "Run test in directory with blue.svg, green.svg and red.svg."
   (declare (debug (body))
@@ -115,11 +114,12 @@ blue.svg, green.svg and red.svg."
   (declare (debug (body))
            (indent defun))
   `(picpocket-with-test-dir
-     (with-current-buffer (picpocket-directory default-directory "blue.svg")
-       (prog1
-           (progn ,@body)
-         (when (buffer-live-p (get-buffer picpocket-buffer))
-           (kill-buffer picpocket-buffer))))))
+     (picpocket-directory default-directory "blue.svg")
+     ;; (with-current-buffer picpocket-buffer
+     (prog1
+         (progn ,@body)
+       (when (buffer-live-p (get-buffer picpocket-buffer))
+         (kill-buffer picpocket-buffer)))))
 
 
 (defmacro picpocket-with-test-dir-tree (&rest body)
@@ -146,10 +146,11 @@ warm/red.svg"
   (declare (debug (body))
            (indent defun))
   `(picpocket-with-test-dir-tree
-     (with-current-buffer (picpocket-directory default-directory "green.svg")
-       (prog1
-           (progn ,@body)
-         (kill-buffer picpocket-buffer)))))
+     (picpocket-directory default-directory "green.svg")
+     ;; (with-current-buffer picpocket-buffer
+     (prog1
+         (progn ,@body)
+       (kill-buffer picpocket-buffer))))
 
 
 
@@ -177,6 +178,8 @@ warm/red.svg"
     (picpocket-bench))
   (with-current-buffer "*Messages*"
     (write-file "messages.txt")))
+
+(defvar imagemagick-render-type)
 
 ;; PENDING - picpocket-file-list bench
 (defun picpocket-bench ()
@@ -274,7 +277,7 @@ warm/red.svg"
               pruned-alists)
         (setq old-alist alist))
       (display-buffer
-       (with-current-buffer (get-buffer-create "*Picp-bench*")
+       (with-current-buffer (get-buffer-create "*Picpocket-bench*")
          (erase-buffer)
          (dolist (x (nreverse pruned-alists))
            (insert "\n")

@@ -1,12 +1,12 @@
 ;;; picpocket.el --- Image viewer -*- lexical-binding: t; coding: utf-8-unix -*-
 
-;; Copyright (C) 2017 Johan Claesson
-;; Author: Johan Claesson <johanclaesson@bredband.net>
-;; Maintainer: Johan Claesson <johanclaesson@bredband.net>
+;; Copyright (C) 2017-2020 Johan Claesson
+;; Author: Johan Claesson <johanwclaesson@gmail.com>
+;; Maintainer: Johan Claesson <johanwclaesson@gmail.com>
 ;; URL: https://github.com/johanclaesson/picpocket
-;; Version: 40
+;; Version: 41
 ;; Keywords: multimedia
-;; Package-Requires: ((emacs "24.4"))
+;; Package-Requires: ((emacs "25.1"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -23,23 +23,25 @@
 
 ;;; Commentary:
 
-;; Picpocket is an image viewer which requires GNU Emacs 24.4+
-;; compiled with ImageMagick.  It have commands for:
+;; Picpocket is an image viewer which requires GNU Emacs 27.1 or later
+;; or 25.1-26.3 compiled with ImageMagick.  It have commands for:
 ;;
 ;; * File operations on the picture files (delete, move, copy, hardlink).
 ;; * Scale and rotate the picture.
 ;; * Associate pictures with tags which are saved to disk.
 ;; * Filter pictures according to tags.
 ;; * Customizing keystrokes for quick tagging and file operations.
-;; * Undo and browse history of undoable commands.
+;; * Undo and visual history of undoable commands.
 ;;
 ;;
-;; Main entry point
-;; ----------------
+;; Main entry points
+;; -----------------
 ;;
 ;; Command: picpocket
+;;   View the pictures in the current directory.
 ;;
-;; View the pictures in the current directory.
+;; Command: picpocket-directory
+;;   View the pictures in specified directory.
 ;;
 ;;
 ;; Main keybindings
@@ -61,6 +63,9 @@
 ;; e         - Customize keystrokes (see below)
 ;; TAB f     - Toggle full-screen
 ;; TAB r     - Toggle recursive inclusion of pictures in sub-directories
+;; l l       - List current pictures
+;; l n       - List current pictures with thumbnails
+;; l T       - Browse tag database
 ;;
 ;; With prefix argument many of the commands will operatate on all the
 ;; pictures in the current list instead of just the current picture.
@@ -74,10 +79,6 @@
 ;; cache.  The intention is that they should block Emacs for so short
 ;; periods that it is not noticable.  But if you want to get rid of
 ;; them set `picpocket-inhibit-timers' or kill the picpocket buffer.
-;;
-;; Picpocket is to be considered beta software.  Keybindings,
-;; variables and such may change in future versions.  Tag database
-;; file format will remain backwards compatible though.
 ;;
 ;;
 ;; Keystroke customization
@@ -137,6 +138,7 @@
 ;; If you change the file-name and the file content at the same time
 ;; there is no way to recover automatically.
 
+
 ;;; Code:
 
 (eval-when-compile
@@ -144,10 +146,14 @@
   (require 'ido))
 
 (require 'cl-lib)
+(require 'cl-seq)
 (require 'dired)
 (require 'subr-x)
 (require 'ring)
 (require 'ewoc)
+(require 'time-date)
+(require 'image)
+(require 'seq)
 
 ;;; Options
 
@@ -185,17 +191,35 @@ will jump to the definition that the variable
   :risky t
   :type 'symbol)
 
-(defcustom picpocket-filter-consider-dir-as-tag t
-  "Whether filter will consider the directory as a tag.
+(define-obsolete-variable-alias 'picpocket-filter-consider-dir-as-tag
+  'picpocket-consider-dir-as-tag "picpocket v41")
 
-If non-nil add the containing directory name to the list of tags
-stored in database.  This matters only when considering a filter.
-For example the potential extra tag is not shown in the list of
-tags in the header line.
-
-The special value `all' means add all directories in the whole
-path (after all soft links have been resolved)."
+(defcustom picpocket-consider-dir-as-tag t
+  "If non-nil the directory name will be added as a tag."
   :type 'boolean)
+
+(defcustom picpocket-dirs-not-considered-tags nil
+  "List of directory names which will not be considered tags.
+
+This is only relevant if `picpocket-consider-dir-as-tag'
+is non-nil."
+  :type 'list)
+
+(defface picpocket-dir-tags-face  '((((background light))
+                                     (:foreground "blue" :slant italic))
+                                    (((background dark))
+                                     (:foreground "cyan" :slant italic)))
+  "Face for tags derived from the directory the file is stored in.")
+
+(defface picpocket-list-main-field '((t (:weight bold)))
+  "Face for the file-name in list buffers.")
+
+(defface picpocket-header-file '((t (:inherit highlight)))
+  "Face for the file-name in the header.")
+
+(defface picpocket-dim-face '((t (:foreground "gray")))
+  "Face for unavailable commands.")
+
 
 (defvar picpocket-filter-ignore-hyphens t
   "If non-nil the filter ignores underscores and dashes.")
@@ -274,7 +298,7 @@ variable can be toggled with the command
 \\[picpocket-toggle-destination-dir] in the picpocket buffer."
   :type 'boolean)
 
-(defcustom picpocket-undo-thumbnails-size 7
+(defcustom picpocket-thumbnail-size 5
   "The heigth of picpocket undo thumbnails.
 Specified in number of default line heigths."
   :type 'integer)
@@ -302,55 +326,28 @@ This affects the commands `picpocket-scroll-some-*'."
   "Normal hook that runs in newly created fullscreen frames."
   :type 'hook)
 
+(defcustom picpocket-slide-show-delay 8
+  "Number of seconds to pause for each picture in slide show."
+  :type 'number)
 
-;;; Internal variables
 
-(defconst picpocket-version 40)
+
+;;; Variables
+
+;; PENDING some of these would make sense to convert to defcustom
+
+(defconst picpocket-version 41)
 (defconst picpocket-buffer "*picpocket*")
 (defconst picpocket-undo-buffer "*picpocket-undo*")
+(defconst picpocket-list-buffer "*picpocket-list*")
+(defconst picpocket-identical-files-buffer "*picpocket-identical-files*")
 
-(defvar picpocket-max-undo-thumbnails 4)
-(defvar picpocket-gimp-executable (executable-find "gimp"))
-(defvar picpocket-look-ahead-max 5)
-(defvar picpocket-frame nil)
-(defvar picpocket-old-frame nil)
-(defvar picpocket-last-action nil)
-(defvar picpocket-last-arg nil)
-(defvar picpocket-debug nil)
-(defvar picpocket-sum 0)
-(defvar picpocket-picture-regexp nil)
-(defvar picpocket-last-look-ahead nil)
-(defvar picpocket-clock-alist nil)
-(defvar picpocket-adapt-to-window-size-change t)
-(defvar picpocket-entry-function nil)
-(defvar picpocket-entry-args nil)
-(defvar picpocket-filter nil)
-(defvar picpocket-window-size nil
-  "The current window size in pixels.
-This is kept for the benefit of the idle timer functions that do
-not necessarily run with the picpocket window selected.")
-(defvar picpocket-header-text "")
-(defvar picpocket-demote-warnings nil)
-(defvar picpocket-sha1sum-executable nil)
-(defvar picpocket-old-keystroke-alist nil)
-(defvar picpocket-default-backdrop-commands
-  '(("display" . "-window root")
-    ("feh" . "--bg-file")
-    ("hsetroot" . "-tile")
-    ("xsetbg")))
-(defvar picpocket-tag-completion-table (make-vector 127 0))
-(defvar picpocket-minibuffer-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map minibuffer-local-map)
-    (define-key map [tab] 'completion-at-point)
-    map)
-  "Keymap used for completing tags in minibuffer.")
-(defvar picpocket-undo-list-size 25)
-(defvar picpocket-undo-ring nil)
-(defvar picpocket-fatal nil)
-(defvar picpocket-scroll-command nil)
-(defvar picpocket-old-fit nil)
-(defvar picpocket-last-frame-that-used-minibuffer nil)
+(defvar picpocket-popping-buffers
+  (list picpocket-undo-buffer
+        picpocket-identical-files-buffer)
+  "List of buffers that pops to another window when they appear.
+Only commands that use the `picpocket-with-singleton-buffer'
+macro are affected by this list.")
 
 (defvar picpocket-idle-functions
   '((picpocket-update-current-bytes 0.1)
@@ -379,6 +376,60 @@ WORK-FUNCTION at the next invocation.")
 (defvar picpocket-idle-f-pause (seconds-to-time 0.1))
 (defvar picpocket-idle-f-debug nil)
 (defvar picpocket-idle-f-header-info nil)
+
+(defvar picpocket-gimp-executable (executable-find "gimp"))
+(defvar picpocket-look-ahead-max 5)
+(defvar picpocket-frame nil)
+(defvar picpocket-old-frame nil)
+(defvar picpocket-last-action nil)
+(defvar picpocket-last-arg nil)
+(defvar picpocket-debug nil)
+(defvar picpocket-sum 0)
+(defvar picpocket-picture-regexp nil)
+(defvar picpocket-last-look-ahead nil)
+(defvar picpocket-clock-alist nil)
+(defvar picpocket-adapt-to-window-size-change t)
+(defvar picpocket-entry-function nil)
+(defvar picpocket-entry-args nil)
+(defvar picpocket-filter nil)
+(defvar picpocket-window-size nil
+  "The current window size in pixels.
+This is kept for the benefit of the idle timer functions that do
+not necessarily run with the picpocket window selected.")
+(defvar picpocket-header-text "")
+(defvar picpocket-demote-warnings nil)
+(defvar picpocket-sha1sum-executable nil)
+(defvar picpocket-old-keystroke-alist nil)
+(defvar picpocket-default-backdrop-commands
+  '(("display" . "-window root")
+    ("feh" . "--bg-tile")
+    ("hsetroot" . "-tile")
+    ("xsetbg")))
+(defvar picpocket-tag-completion-table (make-vector 127 0))
+(defvar picpocket-minibuffer-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map minibuffer-local-map)
+    (define-key map [tab] #'completion-at-point)
+    map)
+  "Keymap used for completing tags in minibuffer.")
+(defvar picpocket-max-undo-thumbnails 4)
+(defvar picpocket-undo-list-size 25)
+(defvar picpocket-undo-ring nil)
+(defvar picpocket-fatal nil)
+(defvar picpocket-scroll-command nil)
+(defvar picpocket-old-fit nil)
+(defvar picpocket-last-frame-that-used-minibuffer nil)
+(defvar picpocket-list-pic-list nil)
+(defvar picpocket-identical-files-pic nil)
+(defvar picpocket-list-entry-function nil)
+(defvar picpocket-list-thumbnails nil)
+(defvar picpocket-thumbnail-margin 4)
+(defvar picpocket-list-max-width 45)
+(defvar picpocket-prefer-imagemagick (< emacs-major-version 27)
+  "If non-nil prefer imagemagick over other image types.
+
+The default is to prefer imagemagick before 27.1 to get support
+for scale and rotate.")
 
 
 
@@ -422,8 +473,9 @@ When there are no pictures in the list `picpocket-index' is zero.")
 
 
 (defsubst picpocket-pic (pic)
-  (car (or pic picpocket-current)))
-
+  (car (or pic
+           picpocket-current
+           (error "No current picture"))))
 
 (defsubst picpocket-prev (&optional pic)
   (picpocket-pic-prev (picpocket-pic pic)))
@@ -478,39 +530,42 @@ When there are no pictures in the list `picpocket-index' is zero.")
 (defmacro picpocket-command (&rest body)
   "Macro used in normal picpocket commands.
 It is used in all commands except for those that switch to
-another buffer (those use `picpocket-bye-command').  It takes care of
-common stuff that shall be done before and after all commands in
-picpocket mode.  The convention is to invoke this macro in the
-body of all command functions.  It is not used in subroutines
-because that would make it harder to verify that it is used in
-all commands (and preferably only used one time).
-\(fn &rest BODY)"
+another buffer.  It takes care of common stuff that shall be done
+before and after all commands in picpocket mode.  The convention
+is to invoke this macro in the BODY of all command functions.  It
+is not used in subroutines because that would make it harder to
+verify that it is used in all commands (and preferably only used
+one time)."
   (declare (indent defun)
            (debug (body)))
-  `(progn
-     (picpocket-ensure-picpocket-buffer)
-     (let ((rc (progn ,@body)))
+  (let ((rc (make-symbol "rc")))
+    `(progn
        (picpocket-ensure-picpocket-buffer)
-       (picpocket-update-buffer)
-       (when (buffer-live-p (get-buffer picpocket-undo-buffer))
-         (picpocket-update-undo-buffer))
-       rc)))
+       (let ((,rc (progn ,@body)))
+         (picpocket-ensure-picpocket-buffer)
+         (picpocket-update-buffers)
+         ,rc))))
 
-(defmacro picpocket-bye-command (&rest body)
-  "Macro used in picpocket commands that switch to another buffer.
-See `picpocket-command'.
-\(fn &rest BODY)"
-  (declare (indent defun)
-           (debug (body)))
-  `(progn
-     (picpocket-ensure-picpocket-buffer)
-     ,@body))
-
+(defmacro picpocket-with-singleton-buffer (name &rest body)
+  (declare (indent 1)
+           (debug (form form body)))
+  (let ((buffer (make-symbol "buffer"))
+        (old-buffer (make-symbol "old-buffer")))
+    `(let ((,old-buffer (buffer-name)))
+       (when (get-buffer ,name)
+         (kill-buffer ,name))
+       (let ((,buffer (get-buffer-create ,name)))
+         (if (and (member ,name picpocket-popping-buffers)
+                  (not (string-equal ,old-buffer ,name)))
+             (pop-to-buffer ,buffer)
+           (switch-to-buffer ,buffer))
+         (with-current-buffer ,buffer
+           (buffer-disable-undo)
+           ,@body)))))
 
 
 (cl-defmacro picpocket-when-let ((var value) &rest body)
-  "Evaluate VALUE, if the result is non-nil bind it to VAR and eval BODY.
-\(fn (VAR VALUE) &rest BODY)"
+  "Evaluate VALUE, if the result is non-nil bind it to VAR and eval BODY."
   (declare (debug ((symbolp form) body))
            (indent 1))
   `(let ((,var ,value))
@@ -566,20 +621,23 @@ with `cl-multiple-value-bind' etc."
        (picpocket-clock-report ,title))))
 
 
-;;; Picp mode
+;;; Picpocket mode
 
 (define-derived-mode picpocket-base-mode special-mode "picpocket-base"
   "Base major mode for buffers with images.
-This mode is not used directly.  Other modes inherit from this mode."
+This mode is not used directly.  Other modes inherit from this mode.
+
+\\{picpocket-base-mode-map}"
   (buffer-disable-undo)
   ;; Ensure imagemagick is preferred.
-  (unless (eq 'imagemagick (cdar image-type-file-name-regexps))
-    (let ((entry (rassq 'imagemagick image-type-file-name-regexps)))
-      (setq-local image-type-file-name-regexps
-                  (cons entry
-                        (delete entry
-                                (cl-copy-list image-type-file-name-regexps))))))
-  (setq-local image-type-header-regexps nil)
+  ;; (when picpocket-prefer-imagemagick
+  ;; (unless (eq 'imagemagick (cdar image-type-file-name-regexps))
+  ;; (let ((entry (rassq 'imagemagick image-type-file-name-regexps)))
+  ;; (setq-local image-type-file-name-regexps
+  ;; (cons entry
+  ;; (delete entry (cl-copy-list
+  ;; image-type-file-name-regexps))))))
+  ;; (setq-local image-type-header-regexps nil))
   (when (boundp 'image-scaling-factor)
     (setq-local image-scaling-factor 1.0))
   ;; image-map is embedded as text property on all images,
@@ -591,7 +649,9 @@ This mode is not used directly.  Other modes inherit from this mode."
         picpocket-fatal nil))
 
 (define-derived-mode picpocket-mode picpocket-base-mode "picpocket"
-  "Major mode for the main *picpocket* buffer."
+  "Major mode for the main *picpocket* buffer.
+
+\\{picpocket-mode-map}"
   ;; PENDING
   ;; :after-hook (picpocket-update-keymap)
   (picpocket-db-init)
@@ -625,23 +685,44 @@ This mode is not used directly.  Other modes inherit from this mode."
   (remove-hook 'kill-emacs-hook #'picpocket-delete-trashcan)
   nil)
 
-(let ((map (make-sparse-keymap))
-      (toggle-map (make-sparse-keymap
-                   (concat "Toggle: [f - fullscreen]"
-                           " [h - header]"
-                           " [d - destination]"
-                           " [r - recursive]"
-                           " [l - follow symlinks]"
-                           " [D - debug]"))))
-  (define-key toggle-map [?f] #'picpocket-toggle-fullscreen-frame)
-  (define-key toggle-map [?d] #'picpocket-toggle-destination-dir)
-  (define-key toggle-map [?h] #'picpocket-toggle-header)
-  (define-key toggle-map [?r] #'picpocket-toggle-recursive)
-  (define-key toggle-map [?l] #'picpocket-toggle-follow-symlinks)
-  (define-key toggle-map [?D] #'picpocket-toggle-debug)
+(defvar picpocket-base-toggle-map
+  (let ((map (make-sparse-keymap
+              (concat "Toggle:"
+                      " [d - destination]"
+                      " [r - recursive]"
+                      " [l - follow symlinks]"
+                      " [t - dir-tags]"
+                      " [n - thumbnails]"
+                      " [D - debug]"))))
+    (define-key map [?d] #'picpocket-toggle-destination-dir)
+    (define-key map [?r] #'picpocket-toggle-recursive)
+    (define-key map [?l] #'picpocket-toggle-follow-symlinks)
+    (define-key map [?t] #'picpocket-toggle-dir-tags)
+    (define-key map [?n] #'picpocket-toggle-thumbnails)
+    (define-key map [?D] #'picpocket-toggle-debug)
+    map))
 
+(defvar picpocket-toggle-map
+  (let ((map (make-sparse-keymap
+              ;; PENDING compute...
+              (concat "Toggle:"
+                      " [f - fullscreen]"
+                      " [h - header]"
+                      " [d - destination]"
+                      " [r - recursive]"
+                      " [l - follow symlinks]"
+                      " [t - dir-tags]"
+                      " [n - thumbnails]"
+                      " [D - debug]"))))
+    (set-keymap-parent map picpocket-base-toggle-map)
+    (define-key map [?f] #'picpocket-toggle-fullscreen-frame)
+    (define-key map [?h] #'picpocket-toggle-header)
+    map))
+
+(let ((map (make-sparse-keymap)))
   (suppress-keymap map)
-  (define-key map [tab] toggle-map)
+  (define-key map [??] #'picpocket-help)
+  (define-key map [tab] picpocket-toggle-map)
   (define-key map [backspace] #'picpocket-previous)
   (define-key map [?p] #'picpocket-previous)
   (define-key map [?\s] #'picpocket-next)
@@ -651,15 +732,14 @@ This mode is not used directly.  Other modes inherit from this mode."
   (define-key map [?e] #'picpocket-edit-keystrokes)
   (define-key map [home] #'picpocket-home)
   (define-key map [?k] #'picpocket-delete-file)
-  (define-key map [(control ?d)] #'picpocket-delete-file)
   (define-key map [deletechar] #'picpocket-delete-file)
   (define-key map [end] #'picpocket-end)
   (define-key map [?q] #'picpocket-quit)
-  (define-key map [?s] #'picpocket-slideshow)
+  (define-key map [?s] #'picpocket-slide-show)
   (define-key map [?r] #'picpocket-rename)
   (define-key map [?m] #'picpocket-move)
   (define-key map [?c] #'picpocket-copy)
-  (define-key map [?l] #'picpocket-hardlink)
+  (define-key map [?h] #'picpocket-hardlink)
   (define-key map [(meta ?m)] #'picpocket-move-by-keystroke)
   (define-key map [(meta ?c)] #'picpocket-copy-by-keystroke)
   (define-key map [(meta ?l)] #'picpocket-hardlink-by-keystroke)
@@ -712,7 +792,11 @@ This mode is not used directly.  Other modes inherit from this mode."
   (define-key map [?x ?g] #'picpocket-gimp-open)
   (define-key map [?x ?t] #'picpocket-trim)
   (define-key map [?x ?b] #'picpocket-set-backdrop)
-  (define-key map [??] #'picpocket-help)
+  (define-key map [?l ?i] #'picpocket-list-identical-files)
+  (define-key map [?l ?l] #'picpocket-list-current-list)
+  (define-key map [?l ?t] #'picpocket-list-current-by-tags)
+  (define-key map [?l ?T] #'picpocket-list-all-tags)
+  (define-key map [?l ?n] #'picpocket-list-current-list-with-thumbnails)
   (setq picpocket-mode-map map))
 
 
@@ -734,6 +818,7 @@ This mode is not used directly.  Other modes inherit from this mode."
 
 (defun picpocket-directory (dir &optional selected-file)
   "View the pictures in DIR starting with SELECTED-FILE."
+  (interactive "DDirectory: ")
   (setq picpocket-entry-function 'picpocket-directory
         picpocket-entry-args (list dir))
   (let ((files (picpocket-file-list dir)))
@@ -747,6 +832,21 @@ This mode is not used directly.  Other modes inherit from this mode."
                        when (picpocket-picture-file-p file t)
                        collect file))
   (picpocket-create-buffer files selected-file))
+
+;;;###autoload
+(defun picpocket-list-all-tags ()
+  "Browse database of picpocket tags.
+
+Tags are added to pictures with for example the
+`picpocket-edit-tags' command inside the picpocket buffer (bound to
+\\[picpocket-edit-tags])."
+  (interactive)
+  (picpocket-with-singleton-buffer picpocket-list-buffer
+    (picpocket-list-tags-mode)
+    (setq-local picpocket-list-entry-function #'picpocket-list-all-tags)
+    (setq-local picpocket-list-pic-list nil)
+    (picpocket-list-tags-refresh)
+    (tabulated-list-sort 0)))
 
 ;;;###autoload
 (defun picpocket-db-update ()
@@ -792,6 +892,7 @@ arg (ARG) read a number in the minibuffer and set rotation to
 that."
   (interactive "P")
   (picpocket-command
+    (picpocket-check-rotation-support)
     (picpocket-rotate -10.0 arg)))
 
 (defun picpocket-rotate-clockwise-10-degrees (&optional arg)
@@ -801,12 +902,20 @@ arg (ARG) read a number in the minibuffer and set rotation to
 that."
   (interactive "P")
   (picpocket-command
+    (picpocket-check-rotation-support)
     (picpocket-rotate 10.0 arg)))
+
+(defun picpocket-check-rotation-support ()
+  (unless (eq 'imagemagick (picpocket-image-type picpocket-current))
+    (message "%s%s"
+             "Rotating to non-square angels require Emacs compiled with "
+             "imagemagick and `picpocket-prefer-imagemagick' non-nil.")))
 
 (defun picpocket-reset-rotation ()
   "Display the current picture as is without any rotation."
   (interactive)
   (picpocket-command
+    (picpocket-current-picture-check)
     (picpocket-set-rotation picpocket-current 0.0)))
 
 (defun picpocket-rotate (delta arg)
@@ -814,7 +923,7 @@ that."
                      (float (read-number "Set rotation in degrees"
                                          (picpocket-rotation)))
                    (+ (picpocket-rotation) delta))))
-    (picpocket-error-if-rotation-is-unsupported)
+    (picpocket-current-picture-check)
     (picpocket-set-rotation picpocket-current degrees)))
 
 
@@ -825,8 +934,7 @@ With prefix arg (ARG) read scale percent in minibuffer."
   (picpocket-command
     (if arg
         (setq picpocket-scale (read-number "Scale factor: " picpocket-scale))
-      (picpocket-alter-scale 10))
-    (picpocket-warn-if-scaling-is-unsupported)))
+      (picpocket-alter-scale 10))))
 
 (defun picpocket-scale-out (&optional arg)
   "Zoom out 10%.
@@ -837,8 +945,8 @@ With prefix arg (ARG) read scale percent in minibuffer."
         (setq picpocket-scale (read-number "Scale factor: "
                                            picpocket-scale))
       (picpocket-alter-scale -10))
-    (picpocket-warn-if-scaling-is-unsupported)
-    (picpocket-avoid-overscroll)))
+    (when (picpocket-current-picture-p)
+      (picpocket-avoid-overscroll))))
 
 (defun picpocket-reset-scale ()
   "Reset the scale to 100%."
@@ -846,7 +954,8 @@ With prefix arg (ARG) read scale percent in minibuffer."
   (picpocket-command
     (setq picpocket-scale 100)
     (message "Restore the scale to 100%%.")
-    (picpocket-avoid-overscroll)))
+    (when (picpocket-current-picture-p)
+      (picpocket-avoid-overscroll))))
 
 (defun picpocket-fit-to-both-width-and-height ()
   "Fit the picture to both width and height of window.
@@ -858,8 +967,7 @@ scaling can be restored to 100% by typing \\[picpocket-reset-scale]
   (picpocket-command
     (picpocket-reset-scroll)
     (setq picpocket-fit :x-and-y)
-    (message "Fit picture to both width and height")
-    (picpocket-warn-if-scaling-is-unsupported)))
+    (message "Fit picture to both width and height")))
 
 (defun picpocket-fit-to-width ()
   "Fit the picture to the width of window.
@@ -871,8 +979,7 @@ scaling can be restored to 100% by typing \\[picpocket-reset-scale]
   (picpocket-command
     (picpocket-reset-scroll)
     (setq picpocket-fit :x)
-    (message "Fit picture to width")
-    (picpocket-warn-if-scaling-is-unsupported)))
+    (message "Fit picture to width")))
 
 (defun picpocket-fit-to-height ()
   "Fit the picture to the height of window.
@@ -884,8 +991,7 @@ scaling can be restored to 100% by typing \\[picpocket-reset-scale]
   (picpocket-command
     (picpocket-reset-scroll)
     (setq picpocket-fit :y)
-    (message "Fit picture to height")
-    (picpocket-warn-if-scaling-is-unsupported)))
+    (message "Fit picture to height")))
 
 (defun picpocket-no-fit ()
   "Do not fit the picture to the window."
@@ -900,7 +1006,7 @@ scaling can be restored to 100% by typing \\[picpocket-reset-scale]
   "Attempt to install the current picture as desktop backdrop."
   (interactive)
   (picpocket-command
-    (picpocket-ensure-current-pic)
+    (picpocket-current-picture-check)
     (setq picpocket-backdrop-command (or picpocket-backdrop-command
                                          (picpocket-default-backdrop-command)))
     (unless picpocket-backdrop-command
@@ -934,9 +1040,8 @@ scaling can be restored to 100% by typing \\[picpocket-reset-scale]
 (defun picpocket-toggle-debug ()
   "Toggle debug mode."
   (interactive)
-  (picpocket-command
-    (setq picpocket-debug (not picpocket-debug))
-    (message "Picpocket debug is %s." (if picpocket-debug "on" "off"))))
+  (setq picpocket-debug (not picpocket-debug))
+  (message "Picpocket debug is %s." (if picpocket-debug "on" "off")))
 
 (defun picpocket-toggle-recursive ()
   "Toggle recursive inclusion of sub-directories.
@@ -963,16 +1068,24 @@ This command concerns only symlinks that points to directories."
                  "Follow symlinks."
                "Do not follow symlinks."))))
 
-
-
+(defun picpocket-toggle-dir-tags ()
+  "Toggle the value of `picpocket-consider-dir-as-tag'."
+  (interactive)
+  (picpocket-command
+    (setq picpocket-consider-dir-as-tag
+          (not picpocket-consider-dir-as-tag))
+    (force-mode-line-update)
+    (message "%s containing directories as tags"
+             (if picpocket-consider-dir-as-tag
+                 "Count"
+               "Do not count"))))
 
 (defun picpocket-quit ()
   "Quit picpocket."
   (interactive)
-  (picpocket-bye-command
-    (picpocket-disable-fullscreen)
-    (picpocket-save-journal)
-    (quit-window)))
+  (picpocket-disable-fullscreen)
+  (picpocket-save-journal)
+  (quit-window))
 
 (defun picpocket-disable-fullscreen ()
   (when (picpocket-fullscreen-p)
@@ -989,18 +1102,28 @@ With prefix arg ask for a directory and set variable
 `picpocket-destination-dir' to that.  Calling from Lisp with the argument
 ASK-FOR-DIR non-nil will also do that."
   (interactive "P")
-  (picpocket-command
-    (if ask-for-dir
-        (setq picpocket-destination-relative-current nil
-              picpocket-destination-dir
-              (read-directory-name "Destination dir: "))
-      (setq picpocket-destination-relative-current
-            (not picpocket-destination-relative-current)))
-    (message "Destination directory is relative to %s."
-             (if picpocket-destination-relative-current
-                 "the current directory"
-               picpocket-destination-dir))))
+  (if ask-for-dir
+      (setq picpocket-destination-relative-current nil
+            picpocket-destination-dir
+            (read-directory-name "Destination dir: "))
+    (setq picpocket-destination-relative-current
+          (not picpocket-destination-relative-current)))
+  (message "Destination directory is relative to %s."
+           (if picpocket-destination-relative-current
+               "the current directory"
+             picpocket-destination-dir)))
 
+(defun picpocket-toggle-thumbnails ()
+  "Toggle thumbnails in list buffers.
+
+\(Thumbnails are always enabled in undo buffers)."
+  (interactive)
+  (setq picpocket-list-thumbnails (not picpocket-list-thumbnails))
+  (when picpocket-list-entry-function
+    (funcall picpocket-list-entry-function))
+  (message "Thumbnails %s" (if picpocket-list-thumbnails
+                               "on"
+                             "off")))
 
 
 (defun picpocket-edit-keystrokes ()
@@ -1009,15 +1132,14 @@ To use this command you must set variable `picpocket-keystroke-alist'
 to a variable symbol.  The purpose of this command is to be
 able to quickly move to the definition and edit keystrokes."
   (interactive)
-  (picpocket-bye-command
-    (unless (and picpocket-keystroke-alist
-                 (symbolp picpocket-keystroke-alist))
-      (user-error (concat "You need to set picpocket-keystroke-alist "
-                          "to a symbol for this command to work")))
-    (find-variable-other-window picpocket-keystroke-alist)
-    (goto-char (point-at-eol))))
+  (unless (and picpocket-keystroke-alist
+               (symbolp picpocket-keystroke-alist))
+    (user-error (concat "You need to set picpocket-keystroke-alist "
+                        "to a symbol for this command to work")))
+  (find-variable-other-window picpocket-keystroke-alist)
+  (goto-char (point-at-eol)))
 
-(defun picpocket-slideshow ()
+(defun picpocket-slide-show ()
   "Start slide-show."
   (interactive)
   (picpocket-command
@@ -1025,14 +1147,14 @@ able to quickly move to the definition and edit keystrokes."
                 (picpocket-next-pos))
       (picpocket-next)
       (when (picpocket-next-pos)
-        (sit-for 8)))
-    (message "End of slideshow.")))
+        (sit-for picpocket-slide-show-delay)))
+    (message "End of slide-show.")))
 
 (defun picpocket-visit-file ()
   "Open the current picture in default mode (normally `image-mode')."
   (interactive)
-  (picpocket-bye-command
-    (find-file (picpocket-absfile))))
+  (picpocket-current-picture-check)
+  (find-file (picpocket-absfile)))
 
 (defun picpocket-toggle-fullscreen-frame ()
   "Toggle use of fullscreen frame.
@@ -1071,7 +1193,9 @@ this frame and go back to the old frame."
         (switch-to-buffer picpocket-buffer)
         (with-current-buffer picpocket-buffer
           (setq mode-line-format nil)
-          (add-hook 'focus-in-hook #'picpocket-focus)
+          ;; PENDING use after-focus-change-function instead...?
+          (with-no-warnings
+            (add-hook 'focus-in-hook #'picpocket-focus))
           (add-hook 'minibuffer-setup-hook #'picpocket-minibuffer-setup)
           (add-hook 'minibuffer-exit-hook #'picpocket-minibuffer-exit)
           (with-selected-frame picpocket-frame
@@ -1235,6 +1359,7 @@ This hook make sure it is fitted to the picpocket frame."
   "Move to the last picture in the current list."
   (interactive)
   (picpocket-command
+    (picpocket-current-picture-check)
     (picpocket-set-pos (picpocket-last-pos))
     (unless (picpocket-filter-match-p picpocket-current)
       (let ((prev (picpocket-previous-pos)))
@@ -1253,11 +1378,14 @@ This hook make sure it is fitted to the picpocket frame."
   "Permanently delete the current picture file."
   (interactive)
   (picpocket-command
-    (picpocket-ensure-current-pic)
-    (when (or (not picpocket-confirm-delete)
-              (picpocket-y-or-n-p "Delete file %s from disk? "
-                                  (picpocket-file)))
+    (picpocket-current-picture-check)
+    (when (picpocket-confirm-delete-file (picpocket-file))
       (picpocket-action 'delete nil))))
+
+(defun picpocket-confirm-delete-file (file)
+  (or (not picpocket-confirm-delete)
+      (picpocket-y-or-n-p "Delete file %s from disk? "
+                          file)))
 
 (defun picpocket-y-or-n-p (format &rest objects)
   (let* ((prompt (apply #'format format objects))
@@ -1278,24 +1406,22 @@ The repeatable actions are:
 (defun picpocket-dired ()
   "Visit the current directory in `dired-mode'."
   (interactive)
-  (picpocket-bye-command
-    (if picpocket-current
-        (let ((dir (picpocket-dir))
-              (file (picpocket-absfile)))
-          (dired default-directory)
-          (when (and (equal dir (file-truename default-directory))
-                     (file-exists-p file))
-            (dired-goto-file file)))
-      (dired default-directory))))
+  (if picpocket-current
+      (let ((dir (picpocket-dir))
+            (file (picpocket-absfile)))
+        (dired default-directory)
+        (when (and (equal dir (file-truename default-directory))
+                   (file-exists-p file))
+          (dired-goto-file file)))
+    (dired default-directory)))
 
 (defun picpocket-dired-up-directory ()
   "Enter Dired mode in the parent directory."
   (interactive)
-  (picpocket-bye-command
-    (let ((dir default-directory))
-      (quit-window)
-      (dired (file-name-directory (directory-file-name dir)))
-      (dired-goto-file dir))))
+  (let ((dir default-directory))
+    (quit-window)
+    (dired (file-name-directory (directory-file-name dir)))
+    (dired-goto-file dir)))
 
 (defun picpocket-toggle-header ()
   "Toggle the display of the header line."
@@ -1331,13 +1457,13 @@ current picture.  But if it is moved to another directory it will
 be removed from the picpocket list.
 When called from Lisp DST is the new absolute filename."
   (interactive (list (progn
-                       (picpocket-ensure-current-pic)
+                       (picpocket-current-picture-check)
                        (when (boundp 'ido-read-file-name-non-ido)
-                         (add-to-list 'ido-read-file-name-non-ido
-                                      #'picpocket-rename))
+                         (add-to-list 'ido-read-file-name-non-ido this-command))
                        (read-file-name "To: " nil (picpocket-file) nil
                                        (picpocket-file)))))
   (picpocket-command
+    (picpocket-current-picture-check)
     (picpocket-action (if (file-directory-p dst)
                           'move
                         'rename)
@@ -1370,7 +1496,7 @@ When called from Lisp DST is the destination directory."
     (picpocket-action 'hardlink dst all)))
 
 (defun picpocket-read-destination (action)
-  (picpocket-ensure-current-pic)
+  (picpocket-current-picture-check)
   (list (when current-prefix-arg
           'all)
         (file-name-as-directory
@@ -1381,11 +1507,6 @@ When called from Lisp DST is the destination directory."
                                         ""))
                               (picpocket-destination-dir)))))
 
-(defun picpocket-ensure-current-pic ()
-  (unless (picpocket-filter-match-p picpocket-current)
-    (user-error "No current picture"))
-  (unless (file-exists-p (picpocket-absfile))
-    (error "File %s no longer exists" (picpocket-file))))
 
 (defun picpocket-destination-dir ()
   (if picpocket-destination-relative-current
@@ -1420,7 +1541,7 @@ With prefix arg (ALL) hard link all pictures in the current list."
     (picpocket-file-by-keystroke-command 'hardlink all)))
 
 (defun picpocket-file-by-keystroke-command (action all)
-  (picpocket-ensure-current-pic)
+  (picpocket-current-picture-check)
   (let ((prompt (format "directory to %s%s to"
                         (symbol-name action)
                         (if all " all pictures" ""))))
@@ -1439,7 +1560,7 @@ current list.  Type a minus sign (-) before the keystroke to
 remove the tag from all pictures instead."
   (interactive "P")
   (picpocket-command
-    (picpocket-ensure-current-pic)
+    (picpocket-current-picture-check)
     (pcase (picpocket-read-key-to-add-or-remove-tag nil all)
       (`(,remove ,tag)
        (picpocket-action (if remove 'remove-tag 'add-tag)
@@ -1458,7 +1579,7 @@ sign (-) then the tag is removed from all pictures instead."
     (if all
         (picpocket-tag-to-all (or tags-string
                                   (picpocket-read-tag-for-all)))
-      (picpocket-ensure-current-pic)
+      (picpocket-current-picture-check)
       (let* ((old-tags (picpocket-tags))
              (old-tags-string (picpocket-tags-string-to-edit old-tags))
              (new-tags-string (or tags-string
@@ -1541,7 +1662,7 @@ The filter is a list of tags.  Only pictures with all the tags in
 the filter is shown.  To enter multiple tags separate them with
 spaces.
 
-If `picpocket-filter-consider-dir-as-tag' is non-nil also the
+If `picpocket-consider-dir-as-tag' is non-nil also the
 containing directory counts as a tag as far as the filter is
 concerned.
 
@@ -1568,8 +1689,7 @@ space-separated string."
       (cl-subsetp (picpocket-remove-hyphens
                    picpocket-filter)
                   (picpocket-remove-hyphens
-                   (append (picpocket-tags pic)
-                           (picpocket-extra-tags-for-filter pic))))))
+                   (picpocket-all-tags pic)))))
 
 (defun picpocket-remove-hyphens (list-or-symbol)
   (cond ((not picpocket-filter-ignore-hyphens)
@@ -1582,13 +1702,29 @@ space-separated string."
                    (intern (apply #'string (delete ?- (delete ?_ chars)))))
                list-or-symbol)))))
 
-(defun picpocket-extra-tags-for-filter (pic)
-  (mapcar #'intern
-          (pcase picpocket-filter-consider-dir-as-tag
-            (`nil nil)
-            (`all (split-string (picpocket-dir pic) "/" t))
-            (_ (list (file-name-nondirectory
-                      (directory-file-name (picpocket-dir pic))))))))
+(defun picpocket-all-tags (pic)
+  (delete-dups (append (picpocket-tags pic)
+                       (picpocket-dir-tags pic))))
+
+(defun picpocket-dir-tags (&optional pic)
+  (picpocket-files-dir-tags (picpocket-all-files pic)))
+
+(defun picpocket-files-dir-tags (files)
+  (when picpocket-consider-dir-as-tag
+    (cl-set-difference
+     (delete-dups (mapcar (lambda (file)
+                            (intern
+                             (file-name-nondirectory
+                              (directory-file-name
+                               (file-name-directory file)))))
+                          files))
+     (mapcar #'picpocket-ensure-symbol
+             picpocket-dirs-not-considered-tags))))
+
+(defun picpocket-ensure-symbol (string-or-symbol)
+  (if (stringp string-or-symbol)
+      (intern string-or-symbol)
+    string-or-symbol))
 
 (defun picpocket-no-file (&optional direction)
   (user-error (picpocket-join "No"
@@ -1615,25 +1751,15 @@ space-separated string."
 
 
 (defun picpocket-jump-completions ()
-  (append (picpocket-mapcar #'picpocket-file)
-          (if (picpocket-filter-match-count)
-              (picpocket-filter-matching-indexes)
-            (picpocket-all-indexes))))
+  (picpocket-collect-completions (if (picpocket-filter-match-count)
+                                     #'picpocket-filter-match-p
+                                   #'picpocket-true)))
 
-(defun picpocket-mapcar (f)
-  (cl-loop for pic on picpocket-list
-           when (picpocket-filter-match-p pic)
-           collect (funcall f pic)))
-
-(defun picpocket-all-indexes ()
-  (cl-loop for i from 1 to picpocket-list-length
-           collect (number-to-string i)))
-
-(defun picpocket-filter-matching-indexes ()
+(defun picpocket-collect-completions (predicate)
   (cl-loop for i from 1 to picpocket-list-length
            for pic on picpocket-list
-           when (picpocket-filter-match-p pic)
-           collect (number-to-string i)))
+           when (funcall predicate pic)
+           append (list (number-to-string i) (picpocket-file pic))))
 
 (defun picpocket-jump-to-index (string)
   (when (string-match "^[0-9]+$" string)
@@ -1687,8 +1813,7 @@ space-separated string."
        (not (file-name-absolute-p picpocket-gimp-executable))
        (setq picpocket-gimp-executable
              (executable-find picpocket-gimp-executable)))
-  (unless (picpocket-absfile)
-    (user-error "No current picture"))
+  (picpocket-current-picture-check)
   (start-process picpocket-gimp-executable
                  nil
                  picpocket-gimp-executable
@@ -1707,7 +1832,7 @@ To undo this command simply delete the trimmed file.  (There is
 no explicit undo support in `picpocket-undo' for this command.)"
   (interactive)
   (picpocket-command
-    (picpocket-ensure-current-pic)
+    (picpocket-current-picture-check)
     (let* ((file (picpocket-absfile))
            (trimmed-file (concat (file-name-sans-extension file)
                                  ".trim."
@@ -1720,7 +1845,7 @@ no explicit undo support in `picpocket-undo' for this command.)"
       (unless (zerop (call-process "convert" nil nil nil
                                    "-fuzz" "1%" "-trim" file trimmed-file))
         (error "Failed to trim"))
-      (picpocket-list-insert-after-current (picpocket-make-pic
+      (picpocket-list-insert-before-current (picpocket-make-pic
                                             trimmed-file))
       (picpocket-tags-set picpocket-current tags)
       (message "Trim ok"))))
@@ -1735,7 +1860,7 @@ no explicit undo support in `picpocket-undo' for this command.)"
   (unless picpocket-old-fit
     (setq picpocket-old-fit picpocket-fit))
   (picpocket-ensure-picpocket-buffer)
-  (picpocket-ensure-current-pic)
+  (picpocket-current-picture-check)
   (setq picpocket-fit :x-and-y)
   (set-window-hscroll nil 0)
   (set-window-vscroll nil 0)
@@ -2126,22 +2251,19 @@ The length scrolled is the width of the picture multiplied with
                          (make-picpocket-pos :current picpocket-list
                                              :index 1))))
 
-;; (defun picpocket-picture-file-p (file)
-;; (and (file-regular-p file)
-;; (string-match (picpocket-picture-regexp) file)))
-
 (defun picpocket-picture-file-p (file &optional verbose)
-  (cond ((not (file-regular-p file))
-         (when verbose
-           (message "Skipping %s which is not a regular file" file))
-         nil)
-        ((not (string-match (picpocket-picture-regexp) file))
-         (when verbose
-           (message "Skipping %s which is not a picture file" file))
-         nil)
-        (t t)))
-
-
+  (let ((case-fold-search t))
+    (cond ((not (file-regular-p file))
+           (when verbose
+             (message "Skipping %s which is not a regular file" file))
+           nil)
+          ((null (picpocket-picture-regexp))
+           (error "No image support in this Emacs build"))
+          ((not (string-match (picpocket-picture-regexp) file))
+           (when verbose
+             (message "Skipping %s which is not a picture file" file))
+           nil)
+          (t t))))
 
 (defvar picpocket-done-dirs nil)
 (defvar picpocket-file-count 0)
@@ -2172,7 +2294,7 @@ The length scrolled is the width of the picture multiplied with
                 (message "Found %s pictures so far%s"
                          picpocket-file-count
                          (if picpocket-recursive
-                             (format " (%s)" dir)
+                             (format " (at %s)" dir)
                            ""))))))
         (setq pic-files (nreverse pic-files))
         (when picpocket-recursive
@@ -2243,12 +2365,6 @@ The length scrolled is the width of the picture multiplied with
   (and (>= c ?0)
        (<= c ?9)))
 
-;; (defun picpocket-parse-number (string)
-;; (cl-loop for i from 0 to (1- (length string))
-;; while (picpocket-char-is-number-p (aref string i))
-;; finally return (cons (string-to-number (substring string 0 i))
-;; (substring string i))))
-
 (defun picpocket-dot-file-p (file)
   "Return t if the FILE's name start with a dot."
   (eq (elt (file-name-nondirectory file) 0) ?.))
@@ -2262,8 +2378,18 @@ The length scrolled is the width of the picture multiplied with
 ;; database below.
 
 (defun picpocket-tags (&optional pic)
+  (picpocket-tags-by-sha pic))
+
+(defun picpocket-tags-by-sha (&optional pic)
   (unless (zerop (picpocket-db-count))
     (picpocket-db-tags (picpocket-sha-force pic))))
+
+(defun picpocket-all-files (&optional pic)
+  (or (unless (zerop (picpocket-db-count))
+        (picpocket-db-files (picpocket-sha-force pic)))
+
+      (list (picpocket-absfile pic))))
+
 
 (defun picpocket-tags-set (pic new-tags)
   (let ((match-before (picpocket-filter-match-p pic)))
@@ -2406,17 +2532,652 @@ the database for the given SHA."
           (picpocket-db-remove sha))))))
 
 
+
+
+
+
+
+;;; List modes
+
+
+;; PENDING user defined commands...
+;; make them work in list buffers as well...
+;; (or at least not show help for them...)
+
+
+(defvar picpocket-list-commands nil
+  "The documentation for functions is not known at compile time.
+Therefore save a list of these command and copy documentation in
+the end of this file.")
+
+(defmacro picpocket-list-command (f)
+  "Wrapper for picpocket commands to work from list modes.
+
+F is the picpocket command."
+  (let ((list-f (intern (concat (symbol-name f) "-in-list"))))
+    `(progn
+       (push #',f picpocket-list-commands)
+       (defun ,list-f ()
+         ,(if (symbol-function f)
+              (documentation f t)
+            (concat "Like `" (symbol-name f) "' in list modes."))
+         (interactive)
+         (let ((entry-f picpocket-list-entry-function))
+           (with-current-buffer picpocket-buffer
+             (call-interactively #',f)
+             (funcall entry-f)))))))
+
+(defmacro picpocket-list-file-command (f)
+  "Wrapper for picpocket file commands to work from list modes.
+
+F is the picpocket command."
+  (let ((list-f (intern (concat (symbol-name f) "-in-list"))))
+    `(progn
+       (push #',f picpocket-list-commands)
+       (defun ,list-f ()
+         ,(if (symbol-function f)
+              (documentation f t)
+            (concat "Like `" (symbol-name f) "' in list modes."))
+         (interactive)
+         (let ((absfile (tabulated-list-get-id))
+               (entry-f picpocket-list-entry-function))
+           (unless absfile
+             (error "No file on this line"))
+           (unless (file-exists-p absfile)
+             (error "File %s not found" absfile))
+           (with-current-buffer picpocket-buffer
+             (picpocket-jump-to-absfile absfile)
+             (call-interactively #',f)
+             (funcall entry-f)))))))
+
+(define-derived-mode picpocket-tab-mode tabulated-list-mode
+  "picpocket-tab"
+  "Base mode for picpocket modes derived from tabulated-list-mode.
+
+\\{picpocket-tab-mode-map}"
+  nil)
+
+(define-derived-mode picpocket-list-mode picpocket-tab-mode
+  "picpocket-list"
+  "Major mode for listing the pictures in a picpocket buffer.
+
+\\{picpocket-list-mode-map}"
+  (add-hook 'tabulated-list-revert-hook #'picpocket-list-refresh nil t))
+
+(define-derived-mode picpocket-list-tags-mode picpocket-tab-mode
+  "picpocket-list-tags"
+  "Major mode for listing the tags in the picpocket database.
+
+\\{picpocket-list-tags-mode-map}"
+  (add-hook 'tabulated-list-revert-hook #'picpocket-list-tags-refresh nil t))
+
+(define-derived-mode picpocket-list-identical-files-mode picpocket-tab-mode
+  "picpocket-list-identical-files"
+  "Major mode for listing identical files according to picpocket database.
+
+\\{picpocket-list-identical-files-mode-map}"
+  (add-hook 'tabulated-list-revert-hook #'picpocket-list-identical-files-refresh
+            nil t))
+
+(let ((map (make-sparse-keymap)))
+  (set-keymap-parent map tabulated-list-mode-map)
+  (define-key map [?\ ] #'next-line)
+  (define-key map [backspace] #'previous-line)
+  (define-key map [tab] picpocket-base-toggle-map)
+  (define-key map [?u] #'picpocket-undo)
+  (define-key map [(meta ?u)] #'picpocket-visit-undo-list)
+  (define-key map [??] #'picpocket-help)
+  (define-key map [?d] #'picpocket-dired)
+  (define-key map [?e] #'picpocket-edit-keystrokes)
+  (define-key map [?.] #'picpocket-dired-up-directory)
+  (define-key map [?=] #'picpocket-larger-thumbnails)
+  (define-key map [?+] #'picpocket-larger-thumbnails)
+  (define-key map [?-] #'picpocket-smaller-thumbnails)
+  (define-key map [?l ?l] #'picpocket-list-current-list)
+  (define-key map [?l ?t] #'picpocket-list-current-by-tags)
+  (define-key map [?l ?T] #'picpocket-list-all-tags)
+  (define-key map [?l ?n] #'picpocket-list-current-list-with-thumbnails)
+  ;; PENDING
+  ;; Commands for splitting window for picpocket and list buffers.
+  ;; Make n and p in list buffer update picpocket buffer.
+  ;; (define-key map [?l ?b ?l] #'picpocket-list-current-list-below)
+  ;; (define-key map [?l ?b ?t] #'picpocket-list-current-by-tags-below)
+  ;; (define-key map [?l ?b ?T] #'picpocket-list-all-tags-below)
+  ;; (define-key map [?l ?r ?l] #'picpocket-list-current-list-right)
+  ;; (define-key map [?l ?r ?t] #'picpocket-list-current-by-tags-right)
+  ;; (define-key map [?l ?r ?T] #'picpocket-list-all-tags-right)
+  ;; PENDING
+  ;; (define-key map [?b ?n] #'picpocket-sort-by-number-of-files)
+  ;; (define-key map [?b ?t] #'picpocket-sort-by-tags)
+  ;; (define-key map [?b ?s] #'picpocket-sort-by-score)
+  ;; (define-key map [?b ?r] #'picpocket-reverse-sort-order)
+  (setq picpocket-tab-mode-map map))
+
+(defvar picpocket-list-toggle-map
+  (let ((map (make-sparse-keymap)))
+    ;; (let ((map (copy-keymap picpocket-base-toggle-map)))
+    (set-keymap-parent map picpocket-base-toggle-map)
+    (define-key map [?r] (picpocket-list-command
+                          picpocket-toggle-recursive))
+    (define-key map [?l] (picpocket-list-command
+                          picpocket-toggle-follow-symlinks))
+    (define-key map [?t] (picpocket-list-command
+                          picpocket-toggle-dir-tags))
+    map))
+
+(let ((map (make-sparse-keymap)))
+  (set-keymap-parent map picpocket-tab-mode-map)
+  (define-key map [return] #'picpocket-list-enter)
+  (define-key map [tab] picpocket-list-toggle-map)
+  ;; PENDING
+  ;; (define-key map [?b ?f] #'picpocket-sort-by-file-name)
+  ;; (define-key map [?b ?k] #'picpocket-sort-by-kilo-byte)
+  (define-key map [?v] #'picpocket-visit-file)
+  (define-key map [?s] #'picpocket-list-slide-show)
+  (let ((kill (picpocket-list-file-command picpocket-delete-file)))
+    (define-key map [?k] kill)
+    (define-key map [deletechar] kill))
+  (define-key map [?r] (picpocket-list-file-command picpocket-rename))
+  (define-key map [?m] (picpocket-list-file-command picpocket-move))
+  (define-key map [?c] (picpocket-list-file-command picpocket-copy))
+  (define-key map [?h] (picpocket-list-file-command picpocket-hardlink))
+  (define-key map [(meta ?m)] (picpocket-list-file-command
+                               picpocket-move-by-keystroke))
+  (define-key map [(meta ?c)] (picpocket-list-file-command
+                               picpocket-copy-by-keystroke))
+  (define-key map [(meta ?l)] (picpocket-list-file-command
+                               picpocket-hardlink-by-keystroke))
+  (define-key map [(meta ?t)] (picpocket-list-file-command
+                               picpocket-tag-by-keystroke))
+  (define-key map [?t] (picpocket-list-file-command picpocket-edit-tags))
+  (define-key map [?z] (picpocket-list-file-command picpocket-repeat))
+  (define-key map [?f] (picpocket-list-command picpocket-set-filter))
+  (define-key map [(meta ?f)] (picpocket-list-command
+                               picpocket-set-filter-by-keystroke))
+  (define-key map [?j] (picpocket-list-command picpocket-jump))
+  (define-key map [?x ?g] (picpocket-list-file-command picpocket-gimp-open))
+  (define-key map [?x ?t] (picpocket-list-file-command picpocket-trim))
+  (define-key map [?x ?b] (picpocket-list-file-command picpocket-set-backdrop))
+  (define-key map [?l ?i] #'picpocket-list-identical-files)
+  (setq picpocket-list-mode-map map))
+
+(let ((map (make-sparse-keymap)))
+  (set-keymap-parent map picpocket-tab-mode-map)
+  (define-key map [return] #'picpocket-select-files-with-tag)
+  (setq picpocket-list-tags-mode-map map))
+
+;; PENDING
+;; picpocket-list-file-command to identical files modes as well...?
+;; maybe common parent mode...
+;; Or maybe get rid of identical files mode altogether instead...?
+
+(let ((map (make-sparse-keymap)))
+  (set-keymap-parent map picpocket-tab-mode-map)
+  (define-key map [return] #'picpocket-select-identical-files)
+  (define-key map [?k] #'picpocket-delete-identical-file)
+  (define-key map [?b ?n] nil)
+  (setq picpocket-list-identical-files-mode-map map))
+
+
+;;; List mode
+
+(defun picpocket-list-current-list ()
+  "Switch to a buffer listing the pictures currently in the picpocket list."
+  (interactive)
+  (let ((absfile (cl-case major-mode
+                   (picpocket-mode
+                    (picpocket-absfile))
+                   (picpocket-list-mode
+                    (tabulated-list-get-id))
+                   (t
+                    nil))))
+    (picpocket-with-singleton-buffer picpocket-list-buffer
+      (picpocket-list-mode)
+      (setq-local picpocket-list-entry-function #'picpocket-list-current-list)
+      (tabulated-list-revert)
+      (when absfile
+        (picpocket-list-goto-absfile absfile)))))
+
+(defun picpocket-list-current-list-with-thumbnails ()
+  "Switch to a buffer listing the pictures currently in the picpocket list.
+
+Enables thumbnails pictures.  Thumbnails can also be toggled with
+\\[picpocket-toggle-thumbnails] (bound to
+`picpocket-toggle-thumbnails)."
+  (interactive)
+  (setq picpocket-list-thumbnails t)
+  (picpocket-list-current-list))
+
+(defun picpocket-list-goto-absfile (absfile)
+  (goto-char (point-min))
+  (while (and (not (equal (tabulated-list-get-id) absfile))
+              (not (eobp)))
+    (forward-line 1))
+  (unless (equal (tabulated-list-get-id) absfile)
+    (goto-char (point-min))))
+
+
+(defun picpocket-list-refresh ()
+  (setq-local tabulated-list-format
+              (vector (list "Index" 5 t)
+                      (if picpocket-list-thumbnails
+                          (list "Image" 22 t)
+                        (list "" 0 t))
+                      (list "Filename" 24 t)
+                      (list "Size" 8 (picpocket-tab-lesser-f 2))
+                      (list "Score" 3 (picpocket-tab-lesser-f 3))
+                      (list "Tags" 24 t)
+                      (list "Dir-Tags" 24 t)
+                      (list "Identical-Files" 5 (picpocket-tab-lesser-f 6))
+                      (list "Directory" 32 t)))
+  (setq tabulated-list-entries
+        (cl-loop for pic on picpocket-list
+                 for i = 1 then (1+ i)
+                 when (picpocket-filter-match-p pic)
+                 collect (list (picpocket-absfile pic)
+                               (vector (number-to-string i)
+                                       (picpocket-list-thumbnail pic)
+                                       (propertize (picpocket-file pic)
+                                                   'font-lock-face
+                                                   'picpocket-list-main-field)
+                                       (picpocket-kb
+                                        (picpocket-bytes-force pic))
+                                       (picpocket-score-string pic)
+                                       (picpocket-tags-string pic)
+                                       (picpocket-dir-tags-string pic)
+                                       (number-to-string
+                                        (length (picpocket-all-files pic)))
+                                       (picpocket-dir pic)))))
+  (picpocket-adapt-column-width)
+  (tabulated-list-init-header))
+
+(defun picpocket-list-thumbnail (pic)
+  (let ((file (picpocket-absfile pic)))
+    (if (and picpocket-list-thumbnails
+             (display-images-p)
+             (file-exists-p file))
+        (let ((max-width (* 2 (picpocket-thumbnail-pixels))))
+          (concat (propertize " "
+                              'display
+                              (picpocket-create-thumbnail
+                               file
+                               ;; For some reason the thumbnails do
+                               ;; not show in the undo buffer if
+                               ;; :margin and :max-width are given.
+                               ;; It does not seem to be a problem
+                               ;; here in list mode.
+                               :margin picpocket-thumbnail-margin
+                               :max-width max-width))
+                  (propertize " "
+                              'display
+                              (cons 'space (list :align-to 27)))))
+      "")))
+
+(defun picpocket-create-thumbnail (file &rest args)
+  (apply #'create-image
+         file
+         (picpocket-image-type file)
+         nil
+         :height (picpocket-thumbnail-pixels)
+         args))
+
+(defun picpocket-thumbnail-pixels ()
+   (* picpocket-thumbnail-size (frame-char-height)))
+
+(defun picpocket-larger-thumbnails ()
+  "Enlarge the thumbnails."
+  (interactive)
+  (setq picpocket-thumbnail-size
+        (1+ (round (* 1.1 picpocket-thumbnail-size))))
+  (message "Thumbnail size is %s" picpocket-thumbnail-size)
+  (funcall picpocket-list-entry-function))
+
+(defun picpocket-smaller-thumbnails ()
+  "Enlarge the thumbnails."
+  (interactive)
+  (setq picpocket-thumbnail-size
+        (max 1 (1- (round (* 0.9 picpocket-thumbnail-size)))))
+  (message "Thumbnail size is %s" picpocket-thumbnail-size)
+  (funcall picpocket-list-entry-function))
+
+
+;;; List tags mode
+
+(defun picpocket-list-current-by-tags ()
+  "Switch to a buffer listing the tags of the current picpocket pictures."
+  (interactive)
+  (picpocket-with-singleton-buffer picpocket-list-buffer
+    (picpocket-list-tags-mode)
+    (setq-local picpocket-list-entry-function #'picpocket-list-current-by-tags)
+    (setq-local picpocket-list-pic-list picpocket-list)
+    (picpocket-list-tags-refresh)
+    (tabulated-list-sort 0)))
+
+(defun picpocket-tab-lesser-f (field)
+  (lambda (a b)
+    (picpocket-file-name-lessp (elt (cadr a) field)
+                               (elt (cadr b) field))))
+
+(defun picpocket-list-tags-refresh ()
+  (unless (fboundp 'alist-get)
+    (error "Not supported before Emacs 25.1"))
+  (setq-local tabulated-list-format (vector (list "Tag" 20 t)
+                                            (list "Count" 5
+                                                  (picpocket-tab-lesser-f 1))
+                                            (list "Max Score" 5
+                                                  (picpocket-tab-lesser-f 2))))
+  (let (nr-alist score-alist)
+    (if picpocket-list-pic-list
+        (cl-loop for pic on picpocket-list-pic-list
+                 do (dolist (tag (picpocket-tags pic))
+                      (cl-incf (alist-get tag nr-alist 0))
+                      (setf (alist-get tag score-alist)
+                            (max (alist-get tag score-alist 0)
+                                 (picpocket-score pic)))))
+      (picpocket-db-mapc
+       (lambda (_sha plist)
+         (let* ((tags (picpocket-tag-plist-all-tags plist))
+                (max-score (picpocket-symbol-max tags)))
+           (dolist (tag tags)
+             (cl-incf (alist-get tag nr-alist 0))
+             (setf (alist-get tag score-alist)
+                   (max (alist-get tag score-alist 0) max-score)))))))
+    (setq tabulated-list-entries
+          (cl-loop for (tag . nr) in nr-alist
+                   collect (list tag
+                                 (vector (propertize (symbol-name tag)
+                                                     'font-lock-face
+                                                     'picpocket-list-main-field)
+                                         (number-to-string nr)
+                                         (picpocket-field
+                                          (alist-get
+                                           tag score-alist)))))))
+  (picpocket-adapt-column-width)
+  (tabulated-list-init-header))
+
+(defun picpocket-tag-plist-all-tags (plist)
+  (let ((tags (plist-get plist :tags))
+        (files (plist-get plist :files)))
+    (delete-dups (append (picpocket-files-dir-tags files)
+                         tags))))
+
+(defun picpocket-field (x)
+  (cond ((stringp x)
+         x)
+        ((numberp x)
+         (number-to-string x))
+        ((null x)
+         "-")))
+
+(defun picpocket-list-slide-show ()
+  "Start slide-show from current picture."
+  (interactive)
+  (let ((absfile (tabulated-list-get-id)))
+    (switch-to-buffer picpocket-buffer)
+    (with-current-buffer picpocket-buffer
+      (picpocket-jump-to-absfile absfile)
+      (picpocket-update-buffer)
+      (sit-for picpocket-slide-show-delay)
+      (picpocket-slide-show))))
+
+(defun picpocket-jump-to-absfile (absfile)
+  (let ((pos-list (picpocket-first-pos-by-absfile absfile)))
+    (unless pos-list
+      (error "Picture not found (%s)" absfile))
+    (picpocket-set-pos pos-list)))
+
+(defun picpocket-first-pos-by-absfile (absfile)
+  (cl-loop for pic on picpocket-list
+           for index = 1 then (1+ index)
+           when (equal (picpocket-absfile pic) absfile)
+           return (make-picpocket-pos :current pic
+                                      :index index)))
+
+(defun picpocket-sort-by-number-of-files ()
+  "Sort list by the number of files."
+  (interactive)
+  ;; PENDING
+  ;; (if (eq major-mode 'picpocket-mode)
+  ;; (set sort function and revert...)
+  (setq tabulated-list-sort-key
+        (cons (if (eq major-mode 'picpocket-list-mode)
+                  "Identical-Files"
+                "Count")
+              ;; t here means flip -> higher numbers first
+              t))
+  (tabulated-list-init-header)
+  (tabulated-list-print t))
+
+(defun picpocket-reverse-sort-order ()
+  "Flip the sort order."
+  (interactive)
+  (if (eq major-mode 'picpocket-mode)
+      t
+    (setcdr tabulated-list-sort-key (not (cdr tabulated-list-sort-key)))
+    (tabulated-list-init-header)
+    (tabulated-list-print t)))
+
+(defun picpocket-tab-col-index (column-name)
+  (1- (cl-loop for (name . _) across tabulated-list-format
+               count 1
+               until (string-equal name column-name))))
+
+(defun picpocket-list-enter ()
+  "Go back to picpocket buffer."
+  (interactive)
+  (picpocket-files (cl-loop for (absfile _) in tabulated-list-entries
+                            collect absfile)
+                   (tabulated-list-get-id)))
+
+(defun picpocket-select-files-with-tag ()
+  "Switch to picpocket buffer with pictures tagged with current tag."
+  (interactive)
+  (let ((tag (tabulated-list-get-id)))
+    (picpocket-files (if picpocket-list-pic-list
+                         (cl-loop for pic on picpocket-list-pic-list
+                                  when (memq tag (picpocket-tags pic))
+                                  collect (picpocket-absfile pic))
+                       (let (files)
+                         (picpocket-db-mapc
+                          (lambda (_sha plist)
+                            (let ((tags (picpocket-tag-plist-all-tags plist))
+                                  (file (car (plist-get plist :files))))
+                              (when (memq tag tags)
+                                (cl-pushnew file files)))))
+                         files)))))
+
+(defun picpocket-select-identical-files ()
+  "Switch to picpocket buffer with the listed identical pictures."
+  (interactive)
+  (picpocket-files (picpocket-all-files picpocket-identical-files-pic)
+                   (tabulated-list-get-id)))
+
+
+
+(defun picpocket-score (pic)
+  (picpocket-symbol-max (picpocket-all-tags pic)))
+
+(defun picpocket-symbol-max (symbols)
+  (let ((max 0))
+    (dolist (tag symbols)
+      (when (string-match "^[0-9]+$" (symbol-name tag))
+        (let ((n (string-to-number (symbol-name tag))))
+          (when (or (null max)
+                    (> n max))
+            (setq max n)))))
+    max))
+
+(defun picpocket-score-string (pic)
+  (let ((score (picpocket-score pic)))
+    (if score
+        (number-to-string score)
+      "-")))
+
+(defun picpocket-adapt-column-width ()
+  (setq tabulated-list-format
+        (cl-loop for (header _ . rest) across tabulated-list-format
+                 for i = 0 then (1+ i)
+                 vconcat (vector
+                          (cons header
+                                (cons (if (string-equal header "Image")
+                                          22
+                                        (min picpocket-list-max-width
+                                             (max (picpocket-column-width i)
+                                                  (length header))))
+                                      rest))))))
+
+(defun picpocket-column-width (column-index)
+  (or (cl-loop for (_id desc) in tabulated-list-entries
+               maximize (length (aref desc column-index)))
+      0))
+
+
+;;; List identical-files mode
+
+(defun picpocket-list-identical-files ()
+  "Switch to buffer listing the known identical copies of current picture.
+
+The files are identified with a query to the tag database.
+Therefore only pictures that have tags are considered."
+  (interactive)
+  (let ((pic (cl-case major-mode
+               (picpocket-mode
+                picpocket-current)
+               (picpocket-list-mode
+                (picpocket-first-pic-by-absfile (tabulated-list-get-id)))
+               (picpocket-list-identical-files-mode
+                picpocket-identical-files-pic)
+               (t
+                (error "Mode %s not supported" major-mode)))))
+    (picpocket-with-singleton-buffer picpocket-identical-files-buffer
+      (picpocket-list-identical-files-mode)
+      (setq-local picpocket-list-entry-function
+                  #'picpocket-list-identical-files)
+      (setq-local picpocket-identical-files-pic pic)
+      (setq-local picpocket-list-pic-list picpocket-list)
+      (tabulated-list-revert))))
+;; (picpocket-list-identical-files-refresh)
+;; (tabulated-list-sort 0))))
+
+(defun picpocket-first-pic-by-absfile (absfile)
+  (cl-loop for pic on picpocket-list
+           when (equal (picpocket-absfile pic) absfile)
+           return pic))
+
+(defun picpocket-list-identical-files-refresh ()
+  (setq-local tabulated-list-format
+              (vector (list "Filename" 48 t)
+                      (list "Size" 8 (picpocket-tab-lesser-f 1))
+                      (list "Score" 5 (picpocket-tab-lesser-f 2))
+                      (list "Tags" 24 t)
+                      (list "Dir-Tags" 24 t)))
+  (let ((pic picpocket-identical-files-pic))
+    (setq-local tabulated-list-entries
+                (cl-loop for file in (picpocket-all-files pic)
+                         when (file-exists-p file)
+                         collect (list file
+                                       (vector
+                                        (propertize file
+                                                    'font-lock-face
+                                                    'picpocket-list-main-field)
+                                        (picpocket-kb
+                                         (picpocket-bytes-force pic))
+                                        (picpocket-score-string pic)
+                                        (picpocket-tags-string pic)
+                                        (picpocket-dir-tags-string pic))))))
+  (picpocket-adapt-column-width)
+  (tabulated-list-init-header))
+
+
+(defun picpocket-delete-identical-file ()
+  "Delete file."
+  (interactive)
+  (let ((file (tabulated-list-get-id))
+        (entry (tabulated-list-get-entry)))
+    (unless (and file entry)
+      (user-error "Nothing to delete"))
+    (when (picpocket-confirm-delete-file file)
+      (if (eq 1 (length tabulated-list-entries))
+          (picpocket-action 'delete nil picpocket-identical-files-pic)
+        (picpocket-action 'delete-duplicate
+                          entry
+                          picpocket-identical-files-pic))
+      (picpocket-update-all-buffers))))
+
+;; Do not bother to remove filename from tags database here.  It
+;; cause no harm to keep it.  To remove it would unnecesarily
+;; complicate undo.  Especially in the case when all identical-files are
+;; removed.
+;;
+;; PENDING - Need to take care of *picpocket* when all identical-files
+;; are deleted or picpocket-update-buffers is enough?
+(defun picpocket-delete-duplicate-action (entry pic)
+  (let* ((inhibit-quit t)
+         (sha (picpocket-sha-force pic))
+         (file (picpocket-get-tab-col "Filename" entry))
+         (trash-file (picpocket-trash-file file)))
+    (unless (file-exists-p file)
+      (error "File %s does not exist" file))
+    (picpocket-tags-delete-file pic file)
+    (rename-file file trash-file)
+    (picpocket-stash-undo-op :action 'delete-duplicate
+                             :file file
+                             :sha sha
+                             :trash-file trash-file
+                             ;; :tabulated-entry entry
+                             )))
+
+(defun picpocket-get-tab-col (header &optional entry)
+  (unless entry
+    (setq entry (tabulated-list-get-entry)))
+  (let ((index (cl-loop for (header-name . _) across tabulated-list-format
+                        for i = 0 then (1+ i)
+                        when (string-equal header-name header)
+                        return i)))
+    (aref entry index)))
+
+;; PENDING - Sometimes the top of duplicate buffer is scrolled out
+;; of sight.  Quite annoying.
+(defun picpocket-undo-delete-duplicate-action (op)
+  (let ((trash-file (picpocket-op-trash-file op))
+        (file (picpocket-op-file op))
+        (sha (picpocket-op-sha op))
+        (inhibit-quit t))
+    (if (not (file-exists-p trash-file))
+        (picpocket-undo-fail "Cannot undelete %s, %s does not exist"
+                             (file-name-nondirectory file)
+                             trash-file)
+      (make-directory (file-name-directory file) t)
+      (picpocket-db-tags-copy-file sha file)
+      (rename-file trash-file file)
+      (picpocket-undo-ok "Undeleted the duplicate %s" file))))
+
+
+(defun picpocket-update-buffers ()
+  (picpocket-update-picpocket-buffer)
+  (when (buffer-live-p (get-buffer picpocket-undo-buffer))
+    (picpocket-update-undo-buffer))
+  (when (derived-mode-p 'picpocket-tab-mode)
+    (revert-buffer)))
+
+(defun picpocket-update-all-buffers ()
+  (picpocket-update-buffers))
+;; (picpocket-update-identical-files-buffer)) ...
+
+(defun picpocket-update-identical-files-buffer ()
+  (when (buffer-live-p (get-buffer picpocket-identical-files-buffer))
+    (with-current-buffer picpocket-identical-files-buffer
+      (revert-buffer))))
+
+
+
 ;;; Tag database management
 
-(defvar picpocket-db-mode-map nil)
-(defvar picpocket-db nil)
+(defvar picpocket-db-update-mode-map nil)
 (defvar picpocket-db-update-buffer "*picpocket-db-update*")
 
 (defun picpocket-do-db-update ()
-  (when (get-buffer picpocket-db-update-buffer)
-    (kill-buffer picpocket-db-update-buffer))
-  (with-current-buffer (get-buffer-create picpocket-db-update-buffer)
-    (switch-to-buffer (current-buffer))
+  (picpocket-with-singleton-buffer picpocket-db-update-buffer
     (picpocket-really-do-db-update)))
 
 (defun picpocket-really-do-db-update ()
@@ -2425,12 +3186,10 @@ the database for the given SHA."
          (unique-file-missing (cdr (assq :unique-file-missing alist)))
          (redundant-file-missing (cdr (assq :redundant-file-missing alist)))
          buffer-read-only)
-    (buffer-disable-undo)
-    (erase-buffer)
     (setq truncate-lines t)
     (insert "\n")
 
-    (setq picpocket-db-mode-map (make-sparse-keymap))
+    (setq picpocket-db-update-mode-map (make-sparse-keymap))
 
     (insert (picpocket-emph "%s tags (%s unique) on %s files found.\n\n"
                             (picpocket-db-number-of-tags)
@@ -2503,7 +3262,7 @@ the database for the given SHA."
                     (picpocket-emph " and their entries from database."))))))
 
     (goto-char (point-min))
-    (picpocket-db-mode)))
+    (picpocket-db-update-mode)))
 
 (defun picpocket-db-update-command (key text-function command-function)
   "Create a command and bind it to KEY.
@@ -2518,7 +3277,7 @@ will end up replacing the deleted text."
     (funcall text-function)
     (insert "\n")
     (let ((overlay (make-overlay start (1- (point)))))
-      (define-key picpocket-db-mode-map key
+      (define-key picpocket-db-update-mode-map key
         (lambda ()
           (interactive)
           (if (null (overlay-start overlay))
@@ -2571,58 +3330,59 @@ will end up replacing the deleted text."
                             (picpocket-format-tags (cadr entry)))
             "\n")))
 
-(define-derived-mode picpocket-db-mode special-mode "picpocket-db"
-  (define-key picpocket-db-mode-map [?g] #'picpocket-db-update)
+(define-derived-mode picpocket-db-update-mode special-mode "picpocket-db-update"
+  "Major mode for interacting with picpocket database.
+
+\\{picpocket-db-update-mode-map}"
+  (define-key picpocket-db-update-mode-map [?g] #'picpocket-db-update)
   (setq truncate-lines t))
 
 (defun picpocket-db-traverse ()
   (picpocket-db-init)
   (let ((progress (make-progress-reporter "Traversing database "
                                           0
-                                          (hash-table-count picpocket-db)))
+                                          (picpocket-db-count)))
         (i 0)
         sha-changed
         unique-file-missing
         redundant-file-missing)
-    (maphash (lambda (sha plist)
-               (let ((tags (plist-get plist :tags))
-                     (files (plist-get plist :files))
-                     missing-files existing-files)
-                 (dolist (file files)
-                   (if (file-exists-p file)
-                       (let ((new-sha (picpocket-sha1sum file)))
-                         (unless (equal sha new-sha)
-                           (push (list file tags sha new-sha) sha-changed))
-                         (push file existing-files))
-                     (push (list file tags sha) missing-files)))
-                 (when missing-files
-                   (if existing-files
-                       (setq redundant-file-missing
-                             (append missing-files
-                                     redundant-file-missing))
-                     (setq unique-file-missing
-                           (append missing-files
-                                   unique-file-missing))))
-                 (cl-incf i)
-                 (progress-reporter-update progress i)))
-             picpocket-db)
+    (picpocket-db-mapc
+     (lambda (sha plist)
+       (let ((tags (plist-get plist :tags))
+             (files (plist-get plist :files))
+             missing-files existing-files)
+         (dolist (file files)
+           (if (file-exists-p file)
+               (let ((new-sha (picpocket-sha1sum file)))
+                 (unless (equal sha new-sha)
+                   (push (list file tags sha new-sha) sha-changed))
+                 (push file existing-files))
+             (push (list file tags sha) missing-files)))
+         (when missing-files
+           (if existing-files
+               (setq redundant-file-missing
+                     (append missing-files
+                             redundant-file-missing))
+             (setq unique-file-missing
+                   (append missing-files
+                           unique-file-missing))))
+         (cl-incf i)
+         (progress-reporter-update progress i))))
     (progress-reporter-done progress)
     (list (cons :sha-changed sha-changed)
           (cons :unique-file-missing unique-file-missing)
           (cons :redundant-file-missing redundant-file-missing))))
 
 (defun picpocket-db-compile-tags-for-completion ()
-  (maphash (lambda (_ plist)
-             (dolist (tag (plist-get plist :tags))
-               (intern (symbol-name tag)
-                       picpocket-tag-completion-table)))
-           picpocket-db))
+  (picpocket-db-mapc (lambda (_ plist)
+                       (dolist (tag (plist-get plist :tags))
+                         (intern (symbol-name tag)
+                                 picpocket-tag-completion-table)))))
 
 (defun picpocket-db-number-of-tags ()
   (let ((count 0))
-    (maphash (lambda (_ plist)
-               (cl-incf count (length (plist-get plist :tags))))
-             picpocket-db)
+    (picpocket-db-mapc (lambda (_ plist)
+                         (cl-incf count (length (plist-get plist :tags)))))
     count))
 
 (defun picpocket-db-number-of-unique-tags ()
@@ -2698,11 +3458,26 @@ will end up replacing the deleted text."
     (cl-incf picpocket-db-journal-size)))
 
 (defun picpocket-db-insert-header ()
-  (insert ";; -*- coding: utf-8-unix; no-byte-compile: t -*-\n")
-  (insert ";; This file is auto-generated by picpocket.el in Emacs.\n")
-  (insert ";; If you plan to manually edit this file you should first\n")
-  (insert ";; kill the *picpocket* buffer in Emacs.  Otherwise your\n")
-  (insert ";; edits may become overwritten.\n\n"))
+  (insert (picpocket-db-header) "\n"))
+
+(defconst picpocket-db-header-text
+  "This file is auto-generated by picpocket.el in Emacs.
+Not meant to be manually edited.  But if you plan to manually
+edit this file you should first kill the *picpocket* buffer in
+any Emacs.  Otherwise your edits may become overwritten.")
+
+(defun picpocket-db-header ()
+  (with-temp-buffer
+    (let ((fill-column 54)
+          (comment-start ";; "))
+    (insert "-*- coding: utf-8-unix; no-byte-compile: t -*-\n\n"
+            picpocket-db-header-text)
+    (fill-paragraph)
+    (comment-region (point-min) (point-max))
+    (goto-char (point-min))
+    (while (re-search-forward " +$" nil t)
+      (replace-match ""))
+    (buffer-string))))
 
 (defun picpocket-db-insert-list-item (item)
   (prin1 item)
@@ -2829,7 +3604,10 @@ will end up replacing the deleted text."
           (list (picpocket-db-save-list))
           (t (error "Unknown value of picpocket-db-format %s (%s)"
                     picpocket-db-format (picpocket-db-valid-formats-string))))
-        (insert "\n")))
+        (insert "\n")
+        (insert ";; Local Variables:\n")
+        (insert ";; whitespace-line-column: 1000\n")
+        (insert ";; End:\n")))
     (let ((inhibit-quit t))
       (when (file-exists-p db-file)
         (copy-file db-file old-file))
@@ -2889,11 +3667,9 @@ will end up replacing the deleted text."
             (picpocket-db-read-and-hash-list picpocket-db
                                              'picpocket-db-journal-size)))))))
 
-(defun picpocket-warn (format &rest args)
-  (let ((format (concat "picpocket-warn: " format)))
-    (apply #'message format args)
-    (unless picpocket-demote-warnings
-      (apply #'warn format args))))
+(defun picpocket-db-mapc (f)
+  (maphash f picpocket-db))
+
 
 
 
@@ -3194,10 +3970,10 @@ will end up replacing the deleted text."
     (picpocket-db-save))
   nil)
 
+;; This is skipped when there is a filter.  With a filter this
+;; operation could potentially take a very long time.  And it
+;; currently do not care about any deadlines.
 (defun picpocket-look-ahead-next (&rest ignored)
-  ;; Skip this when there is a filter.  With a filter this operation
-  ;; could potentially take a very long time.  And it currently do not
-  ;; care about any deadlines.
   (unless picpocket-filter
     (let ((pic (or (picpocket-next-pic) (picpocket-previous-pic))))
       (when (and pic
@@ -3270,6 +4046,20 @@ will end up replacing the deleted text."
           (picpocket-set-pos pos)
           t))))
 
+(defun picpocket-current-picture-check ()
+  (unless picpocket-current
+    (user-error "No current picture available"))
+  (unless (picpocket-filter-match-p picpocket-current)
+    (user-error "No picture matching filter %s"
+                (picpocket-format-tags picpocket-filter)))
+  (unless (file-exists-p (picpocket-absfile))
+    (error "File %s no longer exists" (picpocket-file))))
+
+(defun picpocket-current-picture-p ()
+  (and picpocket-current
+       (picpocket-filter-match-p picpocket-current)
+       (file-exists-p (picpocket-absfile))))
+
 (defun picpocket-no-pictures ()
   (insert (propertize (format "\n\nNo pictures in list%s.\n\n"
                               (if picpocket-filter
@@ -3296,15 +4086,16 @@ will end up replacing the deleted text."
                 'face 'bold)))
 
 
-
 (defun picpocket-create-buffer (files &optional selected-file dir)
+  (and (< emacs-major-version 27)
+       picpocket-prefer-imagemagick
+       (not (image-type-available-p 'imagemagick))
+       (message "%s%s" "For picpocket it is recommended that Emacs below 27.1 "
+                "are built with imagemagick."))
   (when selected-file
     (setq selected-file (file-truename
                          (expand-file-name selected-file dir))))
-  (let ((old-buffer (get-buffer picpocket-buffer)))
-    (when old-buffer
-      (kill-buffer old-buffer)))
-  (with-current-buffer (get-buffer-create picpocket-buffer)
+  (picpocket-with-singleton-buffer picpocket-buffer
     (when dir
       (cd dir))
     (picpocket-mode)
@@ -3312,12 +4103,7 @@ will end up replacing the deleted text."
         (picpocket-create-picpocket-list files selected-file)
       (quit (picpocket-reset)
             (signal (car err) (cdr err))))
-    (picpocket-update-buffer)
-    (if (called-interactively-p 'any)
-        (switch-to-buffer (current-buffer))
-      (set-buffer (current-buffer)))
-    (current-buffer))
-  (set-buffer picpocket-buffer))
+    (picpocket-update-buffer)))
 
 
 ;;; Image handling
@@ -3351,21 +4137,10 @@ necessarily run with the picpocket window selected."
                   :rotation (picpocket-rotation pic)
                   keyword (picpocket-scale value))))
 
-(defun picpocket-image-type (pic-or-filename)
-  (let ((filename (if (stringp pic-or-filename)
-                      pic-or-filename
-                    (picpocket-file pic-or-filename))))
-    (unless (string-suffix-p ".svg" filename t)
-      'imagemagick)))
-
-(defun picpocket-error-if-rotation-is-unsupported ()
-  (unless (eq (picpocket-image-type picpocket-current) 'imagemagick)
-    (error "Svg images cannot be rotated")))
-
-(defun picpocket-warn-if-scaling-is-unsupported ()
-  (unless (eq (picpocket-image-type picpocket-current) 'imagemagick)
-    (message "Svg images cannot be scaled")))
-
+(defun picpocket-image-type (_pic-or-filename)
+  (and picpocket-prefer-imagemagick
+       (image-type-available-p 'imagemagick)
+       'imagemagick))
 
 (defun picpocket-size-param (pic canvas-size)
   (pcase-let ((canvas-ratio (picpocket-cons-ratio canvas-size))
@@ -3407,8 +4182,7 @@ necessarily run with the picpocket window selected."
                                       t)))
 
 (defun picpocket-rotated-size (pic)
-  (if (or (zerop (picpocket-rotation pic))
-          (not (eq 'imagemagick (picpocket-image-type pic))))
+  (if (or (zerop (picpocket-rotation pic)))
       (picpocket-size-force pic)
     (image-size (create-image (picpocket-absfile pic)
                               (picpocket-image-type pic)
@@ -3445,8 +4219,10 @@ necessarily run with the picpocket window selected."
 (defun picpocket-picture-regexp ()
   (or picpocket-picture-regexp
       (setq picpocket-picture-regexp
-            (car (rassq 'imagemagick image-type-file-name-regexps)))))
-
+            (if (and picpocket-prefer-imagemagick
+                     (image-type-available-p 'imagemagick))
+                (car (rassq 'imagemagick image-type-file-name-regexps))
+              (mapconcat #'car image-type-file-name-regexps "\\|")))))
 
 (defun picpocket-clear-image-cache ()
   "Clear image cache.  Only useful for benchmarks."
@@ -3540,34 +4316,20 @@ necessarily run with the picpocket window selected."
         (apply #'vector (listify-key-sequence (kbd key)))
       (vector key))))
 
-
-(defun picpocket-describe-keymap (prefix map)
-  (map-keymap (lambda (key binding)
-                (if (keymapp binding)
-                    (picpocket-describe-keymap (vconcat prefix (vector key))
-                                               binding)
-                  (unless (eq binding 'undefined)
-                    (princ (format "%16s - %s\n"
-                                   (key-description (vconcat prefix
-                                                             (vector key)))
-                                   binding)))))
-              map))
-
-(defun picpocket-keymap-to-list (prefix map predicate)
+(defun picpocket-keymap-to-list (prefix map)
   (let (list)
     (map-keymap (lambda (key binding)
                   (if (keymapp binding)
-                      (setq list
-                            (append list
-                                    (picpocket-keymap-to-list (vconcat prefix
-                                                                       (vector
-                                                                        key))
-                                                              binding
-                                                              predicate)))
-                    (when (funcall predicate binding)
-                      (push (cons (vconcat prefix (vector key))
-                                  binding)
-                            list))))
+                      (setq list (append list (picpocket-keymap-to-list
+                                               (vconcat prefix (vector key))
+                                               binding)))
+                    (let ((key-stroke (vconcat prefix (vector key))))
+                      (and (eq (key-binding key-stroke) binding)
+                           (not (eq binding 'undefined))
+                           (not (eq binding 'remap))
+                           (not (eq binding 'forward-button))
+                           (not (get binding 'picpocket-user-command))
+                           (push (cons key-stroke binding) list)))))
                 map)
     list))
 
@@ -3684,24 +4446,24 @@ picpocket mode.
 
 Third invocation will hide the help buffer."
   (interactive)
-  (picpocket-command
-    (if (eq last-command this-command)
-        (setq picpocket-help-count (1+ picpocket-help-count))
-      (setq picpocket-help-count 0
-            picpocket-is-sole-window (eq 1 (count-windows))))
-    (if (picpocket-keystroke-alist)
-        (pcase picpocket-help-count
-          (0 (picpocket-help-user-commands)
-             (picpocket-help-finish))
-          (1 (picpocket-help-mode-commands)
-             (picpocket-help-finish))
-          (_ (setq picpocket-help-count -1)
-             (picpocket-hide-help)))
+  ;; (picpocket-command
+  (if (eq last-command this-command)
+      (setq picpocket-help-count (1+ picpocket-help-count))
+    (setq picpocket-help-count 0
+          picpocket-is-sole-window (eq 1 (count-windows))))
+  (if (picpocket-keystroke-alist)
       (pcase picpocket-help-count
-        (0 (picpocket-help-mode-commands)
+        (0 (picpocket-help-user-commands)
+           (picpocket-help-finish))
+        (1 (picpocket-help-mode-commands)
            (picpocket-help-finish))
         (_ (setq picpocket-help-count -1)
-           (picpocket-hide-help))))))
+           (picpocket-hide-help)))
+    (pcase picpocket-help-count
+      (0 (picpocket-help-mode-commands)
+         (picpocket-help-finish))
+      (_ (setq picpocket-help-count -1)
+         (picpocket-hide-help)))))
 
 (defun picpocket-help-finish ()
   (when picpocket-is-sole-window
@@ -3745,34 +4507,35 @@ Third invocation will hide the help buffer."
 (defun picpocket-help-mode-commands ()
   (help-setup-xref (list #'picpocket-help-mode-commands)
                    (called-interactively-p 'interactive))
-  (with-help-window (help-buffer)
-    (with-current-buffer standard-output
-      (princ "Picpocket mode commands:\n\n")
-      (princ "key             binding\n")
-      (princ "---             -------\n\n")
-      (let* ((predicate (lambda (binding)
-                          (not (or (eq binding 'undefined)
-                                   (get binding 'picpocket-user-command)))))
-             (commands (sort (picpocket-keymap-to-list nil
-                                                       picpocket-mode-map
-                                                       predicate)
-                             (lambda (a b)
-                               (string-lessp
-                                (picpocket-key-sort-string (car a))
-                                (picpocket-key-sort-string (car b)))))))
-        (cl-loop for (key . binding) in commands
-                 do (progn
-                      (princ (format "%-16s" (key-description key)))
-                      (if (eq binding 'picpocket-repeat)
-                          (picpocket-repeat-help)
-                        (princ (symbol-name binding)))
-                      (princ "\n")))))))
+  (let ((mode major-mode)
+        (map (current-local-map))
+        (buffer (current-buffer)))
+    (with-help-window (help-buffer)
+      (with-current-buffer standard-output
+        (princ (format "%s commands:\n\n" mode))
+        (princ "key             binding\n")
+        (princ "---             -------\n\n")
+        (let ((commands (sort (with-current-buffer buffer
+                                (picpocket-keymap-to-list nil map))
+                              (lambda (a b)
+                                (string-lessp
+                                 (picpocket-key-sort-string (car a))
+                                 (picpocket-key-sort-string (car b)))))))
+          (cl-loop for (key . binding) in (seq-uniq commands)
+                   do (when binding
+                        (princ (format "%-16s" (key-description key)))
+                        (if (eq binding 'picpocket-repeat)
+                            (picpocket-repeat-help)
+                          (princ (symbol-name binding)))
+                        (princ "\n"))))))))
 
+
+
+;; Help mode will make hyperlinks for all commands found at end of
+;; line.  For picpocket-repeat we add stuff after command name so that
+;; will not trigger.  Therefore make our own hyperlink for
+;; picpocket-repeat.
 (defun picpocket-repeat-help ()
-  ;; Help mode will make hyperlinks for all commands found at end of
-  ;; line.  For picpocket-repeat we add stuff after command name so that
-  ;; will not trigger.  Therefore make our own hyperlink for
-  ;; picpocket-repeat.
   (insert-text-button "picpocket-repeat"
                       'type 'help-function
                       'help-args (list 'picpocket-repeat))
@@ -3810,14 +4573,16 @@ Third invocation will hide the help buffer."
 
 ;;; Undoable actions functions
 
+;; To add a new undoable action update picpocket-undoable-actions,
+;; picpocket-do-action, picpocket-undo-action, picpocket-undoable-text
+;; and picpocket-op-image-file.
+
+
 (defvar picpocket-undo-ewoc nil)
 (defvar picpocket-undo-legend-ewoc nil)
-(defvar picpocket-undo-window nil)
+;; (defvar picpocket-undo-window nil)
 (defvar picpocket-current-undo-node nil)
 (defvar picpocket-trashcan nil)
-
-(defface picpocket-dim-face '((t (:foreground "gray")))
-  "Face for unavailable commands.")
 
 
 
@@ -3851,6 +4616,7 @@ Third invocation will hide the help buffer."
   to-file
   trash-file
   tags
+  ;; tabulated-entry
   tag)
 
 (cl-defstruct picpocket-legend
@@ -3858,9 +4624,20 @@ Third invocation will hide the help buffer."
   text
   predicate)
 
-(defconst picpocket-undoable-actions '(add-tag remove-tag set-tags delete
-                                               rename move copy hardlink))
-(defconst picpocket-repeatable-actions '(move copy hardlink add-tag remove-tag))
+(defconst picpocket-undoable-actions '(add-tag
+                                       remove-tag
+                                       set-tags
+                                       delete
+                                       rename
+                                       move
+                                       copy
+                                       hardlink
+                                       delete-duplicate))
+(defconst picpocket-repeatable-actions '(move
+                                         copy
+                                         hardlink
+                                         add-tag
+                                         remove-tag))
 
 (unless (cl-subsetp picpocket-repeatable-actions picpocket-undoable-actions)
   (error "Some repeatable action is not undoable"))
@@ -3886,6 +4663,7 @@ pictures in the current picpocket list (this is not supported for
 the delete action, though)."
   (unless (memq action picpocket-undoable-actions)
     (error "Action %s is not undoable" action))
+  (picpocket-current-picture-check)
   (picpocket-stash-undo-begin :action action
                               :arg arg
                               :all (eq pic 'all))
@@ -3897,7 +4675,7 @@ the delete action, though)."
           (when (picpocket-filter-match-p pic)
             (picpocket-do-action action arg pic))
           (setq pic next)))
-    (picpocket-ensure-current-pic)
+    (picpocket-current-picture-check)
     (picpocket-do-action action arg pic)
     (when (memq action picpocket-repeatable-actions)
       (picpocket-save-repeatable-action action arg)))
@@ -3911,6 +4689,12 @@ the delete action, though)."
 ;; PENDING - Move the message calls to the sub-routines....
 ;; Callers of picpocket-action with 'all also print a summary
 ;; message when all pictures are handled.
+;; PENDING - (funcall (intern (concat "picpocket-" action "-action"))) ?
+;; or some CL voodoo?
+;; or a table with all information in one place:
+;; ((set-tags picpocket-set-tags-action nil)
+;; (add-tag picpocket-add-tag-action picpocket-undo-add-tag-action
+;; picpocket-print-add-tag)...)
 (defun picpocket-do-action (action arg pic)
   (pcase action
     (`set-tags
@@ -3927,12 +4711,15 @@ the delete action, though)."
        (error "Refusing to delete all pictures"))
      (let ((file (picpocket-file pic)))
        (picpocket-delete-action pic)
-       (message "%s is no more." file)))
+       (message "%s is deleted.  Type `%s' to undo."
+                file
+                (picpocket-where-is #'picpocket-undo))))
     ((or `move `rename `copy `hardlink)
      (picpocket-file-action action arg pic))
+    (`delete-duplicate
+     (picpocket-delete-duplicate-action arg pic))
     (_
      (error "Unknown action %s %s" action arg))))
-
 
 (defvar picpocket-undo-fail nil)
 (defvar picpocket-undo-ok nil)
@@ -3965,7 +4752,8 @@ the delete action, though)."
     (`add-tag (picpocket-undo-add-tag-action op))
     (`remove-tag (picpocket-undo-remove-tag-action op))
     ((or `rename `move) (picpocket-undo-file-relocate-action op))
-    ((or `copy `hardlink) (picpocket-undo-file-duplicate-action op))))
+    ((or `copy `hardlink) (picpocket-undo-file-duplicate-action op))
+    (`delete-duplicate (picpocket-undo-delete-duplicate-action op))))
 
 (defun picpocket-undo-summary (list)
   (if (cdr list)
@@ -4048,7 +4836,6 @@ the delete action, though)."
                                :file (picpocket-absfile pic)
                                :sha (picpocket-sha-force pic)
                                :tag tag))))
-
 
 (defun picpocket-undo-add-tag-action (op)
   (let* ((file (picpocket-op-file op))
@@ -4337,16 +5124,18 @@ command in the list.
 
 This command picks the first undoable command in that list."
   (interactive)
-  (picpocket-command
-    (let ((undoable (when picpocket-undo-ring
-                      (cl-loop for i from 0 to (ring-length picpocket-undo-ring)
-                               for undoable = (ring-ref picpocket-undo-ring i)
-                               while undoable
-                               when (picpocket-undoable-is-undoable-p undoable)
-                               return undoable))))
-      (if undoable
+  ;; (picpocket-command
+  (let ((undoable (when picpocket-undo-ring
+                    (cl-loop for i from 0 to (ring-length picpocket-undo-ring)
+                             for undoable = (ring-ref picpocket-undo-ring i)
+                             while undoable
+                             when (picpocket-undoable-is-undoable-p undoable)
+                             return undoable))))
+    (if undoable
+        (progn
           (picpocket-undo-action undoable)
-        (user-error "No undoable actions have been done")))))
+          (picpocket-update-all-buffers))
+      (user-error "No undoable actions have been done"))))
 
 
 (defun picpocket-undoable-is-undoable-p (undoable)
@@ -4356,13 +5145,11 @@ This command picks the first undoable command in that list."
 (defun picpocket-visit-undo-list ()
   "List the current undoable commands in a separate buffer."
   (interactive)
-  (picpocket-bye-command
-    (when (> (window-width) 100)
-      (setq picpocket-undo-window (split-window-right)))
-    (switch-to-buffer (get-buffer-create picpocket-undo-buffer))
-    (with-current-buffer picpocket-undo-buffer
-      (picpocket-undo-mode)
-      (picpocket-update-undo-buffer))))
+  (picpocket-with-singleton-buffer picpocket-undo-buffer
+    (picpocket-undo-mode)
+    (picpocket-update-undo-buffer)))
+
+
 
 
 ;;; Undo stash functions
@@ -4378,9 +5165,9 @@ This command picks the first undoable command in that list."
                       :state 'incomplete
                       args)))
 
+;; Grow if needed, but in contrast the ring is never shrinked
+;; dynamically.
 (defun picpocket-maybe-grow-undo-ring ()
-  ;; Grow if needed, but in contrast the ring is never shrinked
-  ;; dynamically.
   (let ((size (ring-size picpocket-undo-ring)))
     (when (> picpocket-undo-list-size size)
       (ring-extend picpocket-undo-ring (- picpocket-undo-list-size size)))))
@@ -4408,12 +5195,6 @@ This command picks the first undoable command in that list."
   (when (or (null picpocket-undo-ring)
             (ring-empty-p picpocket-undo-ring))
     (error "Call to picpocket-stash-undo-op before picpocket-stash-undo-begin"))
-  ;; PENDING - maybe should append instead of push?
-  ;; Currently picpocket-stash-undo-end is reversing the list.
-  ;; (let ((undoable (ring-ref picpocket-undo-ring 0)))
-  ;; (setf (picpocket-undoable-ops undoable)
-  ;; (append (picpocket-undoable-ops undoable)
-  ;; (list (apply #'make-picpocket-op args))))))
   (push (apply #'make-picpocket-op args)
         (picpocket-undoable-ops (ring-ref picpocket-undo-ring 0))))
 
@@ -4442,8 +5223,6 @@ This command picks the first undoable command in that list."
 ;; picpocket-undo-ewoc will be rebuilt from scratch (the picpocket-command macro
 ;; takes care of that).
 
-
-
 (defun picpocket-update-undo-buffer ()
   (with-current-buffer picpocket-undo-buffer
     (let ((progress nil)
@@ -4471,7 +5250,7 @@ This command picks the first undoable command in that list."
                                  "return to picpocket buffer"
                                  #'picpocket-true)
       (goto-char (point-max))
-      (insert "List of undoable actions with the most recent first:\n")
+      (insert "List of undoable actions with the most recent first:\n\n")
       (setq picpocket-current-undo-node nil
             picpocket-undo-ewoc (ewoc-create #'picpocket-undo-pp
                                              nil nil t))
@@ -4510,33 +5289,33 @@ This command picks the first undoable command in that list."
     (cl-loop for i from 0 to (1- picpocket-max-undo-thumbnails)
              for op = (elt ops i)
              while op
-             do (picpocket-mini-image undoable op)
+             do (picpocket-undo-thumbnail undoable op)
              do (insert " "))
     (when (elt ops picpocket-max-undo-thumbnails)
       (insert "....")))
   (insert "\n")
   (insert (propertize "\n" 'line-height 1.5)))
 
-(defun picpocket-mini-image (undoable &optional op)
-  (let ((op (or op (car (picpocket-undoable-ops undoable)))))
-    (picpocket-insert-mini-image (picpocket-op-image-file undoable op))))
 
-(defun picpocket-insert-mini-image (file)
+(defun picpocket-undo-thumbnail (undoable &optional op)
+  (let ((op (or op (car (picpocket-undoable-ops undoable)))))
+    (picpocket-insert-thumbnail (picpocket-op-image-file undoable op))))
+
+(defun picpocket-insert-thumbnail (file)
   (and (display-images-p)
        file
        (file-exists-p file)
-       (insert-image (create-image file
-                                   (picpocket-image-type file)
-                                   nil
-                                   :height (* picpocket-undo-thumbnails-size
-                                              (frame-char-height))))))
+       ;; (insert (propertize " " 'display (picpocket-create-thumbnail file)))))
+       (insert-image (picpocket-create-thumbnail file))))
 
+;; PENDING - could provide :thumbnail-file to picpocket-stash-undo-op instead.
 (defun picpocket-op-image-file (undoable op)
   (if (eq (picpocket-undoable-state undoable) 'undone)
       (picpocket-op-file op)
     (pcase (picpocket-undoable-action undoable)
       ((or `set-tags `add-tag `remove-tag) (picpocket-op-file op))
       (`delete (picpocket-op-trash-file op))
+      (`delete-duplicate (picpocket-op-trash-file op))
       (_ (picpocket-op-to-file op)))))
 
 
@@ -4564,6 +5343,7 @@ This command picks the first undoable command in that list."
                            " from "
                            file))
       (`delete (concat "delete " file))
+      (`delete-duplicate (concat "delete duplicate " file))
       (_ (concat (symbol-name action)
                  " "
                  file
@@ -4644,7 +5424,9 @@ This command picks the first undoable command in that list."
 ;;; The undo buffer's commands
 
 (define-derived-mode picpocket-undo-mode picpocket-base-mode "picpocket-undo"
-  "Major mode for picpocket undo buffer.")
+  "Major mode for picpocket undo buffer.
+
+\\{picpocket-undo-mode-map}")
 
 (let ((map (make-sparse-keymap)))
   (suppress-keymap map)
@@ -4713,34 +5495,17 @@ This command picks the first undoable command in that list."
 (defun picpocket-undo-quit ()
   "Delete the undo buffer and go back to the picpocket buffer."
   (interactive)
-  (kill-buffer picpocket-undo-buffer)
-  (when (window-live-p picpocket-undo-window)
-    (delete-window picpocket-undo-window))
-  (if (null (buffer-live-p (get-buffer picpocket-buffer)))
-      (message "No picpocket buffer found")
-    (picpocket-update-picpocket-buffer)
-    (or (picpocket-select-visible-picpocket-window)
-        (switch-to-buffer picpocket-buffer))))
+  ;; Kill the undo buffer so we don't have to refresh it while it is
+  ;; buried.
+  (quit-window 'kill))
 
 (defun picpocket-update-picpocket-buffer ()
   (when (buffer-live-p (get-buffer picpocket-buffer))
     (with-current-buffer picpocket-buffer
       (picpocket-update-buffer))))
 
-(defun picpocket-select-visible-picpocket-window ()
-  "Return non-nil if visible picpocket window was found."
-  (cl-loop for window in (window-list nil 'no-mini)
-           when (equal (buffer-name (window-buffer window))
-                       picpocket-buffer)
-           return (progn
-                    (select-window window)
-                    t)))
-
-
-
 
 ;;; Header line functions
-
 
 (defun picpocket-header-line ()
   (if (eq (selected-frame) picpocket-frame)
@@ -4754,89 +5519,35 @@ This command picks the first undoable command in that list."
                 (concat " - " msg)
               ""))))
 
-;; (defun picpocket-update-header-seconds ()
-;; (+ picpocket-show-msg-seconds 0.1))
-;;
-;; (defvar picpocket-last-msg nil)
-;; (defvar picpocket-last-msg-timestamp nil)
-;; (defvar picpocket-show-msg-seconds 1.5)
-;;
-;; (defun picpocket-fullscreen-header-line ()
-;; (let ((msg (picpocket-escape-percent (current-message))))
-;; (picpocket-msg "  msg " msg)
-;; (cond ((null msg)
-;; (if (or (null picpocket-last-msg)
-;; (picpocket-last-msg-too-old-p))
-;; (progn
-;; (picpocket-msg "  null msg - nothing")
-;; (setq picpocket-last-msg nil)
-;; (picpocket-header-pic-info))
-;; (picpocket-msg "  null msg - show picpocket-last-msg")
-;; picpocket-last-msg))
-;; ((null picpocket-current)
-;; (setq picpocket-last-msg nil)
-;; msg)
-;; ((not (string-equal msg picpocket-last-msg))
-;; (picpocket-msg "  fresh msg")
-;; (setq picpocket-last-msg msg
-;; picpocket-last-msg-timestamp (current-time))
-;; msg)
-;; ((not (picpocket-last-msg-too-old-p))
-;; (picpocket-msg "  keep msg")
-;; msg)
-;; (t
-;; (picpocket-msg "  pic-info")
-;; (picpocket-header-pic-info)))))
-;;
-;; (defun picpocket-last-msg-too-old-p ()
-;; (time-less-p (seconds-to-time picpocket-show-msg-seconds)
-;; (time-since picpocket-last-msg-timestamp)))
-
-;; (defun picpocket-update-header (&rest ignored)
-;; (picpocket-msg "picpocket-update-header: called")
-;; (when (eq (selected-frame) picpocket-frame)
-;; (picpocket-msg "picpocket-update-header: fullscreen")
-;; (force-mode-line-update)))
-
-;; PENDING - keeping this debug stuff for now.
-(defvar picpocket-start (current-time))
-(defun picpocket-msg (&rest args)
-  (when nil
-    (with-current-buffer (get-buffer-create "*piclog*")
-      (save-excursion
-        (goto-char (point-max))
-        (insert (format "%f %s\n"
-                        (time-to-seconds (time-since picpocket-start))
-                        (mapconcat (lambda (x)
-                                     (if (stringp x)
-                                         x
-                                       (prin1-to-string x)))
-                                   args
-                                   " ")))))))
-
-
 (defun picpocket-header-pic-info ()
   (and picpocket-current
        picpocket-list
        picpocket-db
-       (picpocket-join (concat (format "%s/%s "
-                                       picpocket-index
-                                       picpocket-list-length)
-                               (picpocket-escape-percent (picpocket-header-dir))
-                               "/"
-                               (propertize
-                                (picpocket-escape-percent (picpocket-file))
-                                'face 'highlight))
-                       (when picpocket-debug
-                         picpocket-header-text)
-                       (picpocket-maybe-kb)
-                       (picpocket-scale-info)
-                       (picpocket-rotation-info)
-                       (picpocket-format-tags (picpocket-tags
-                                               picpocket-current))
-                       (picpocket-filter-info)
-                       (when picpocket-idle-f-header-info
-                         (picpocket-idle-f-info)))))
+       (picpocket-join
+        (concat (format "%s/%s "
+                        picpocket-index
+                        picpocket-list-length)
+                (picpocket-escape-percent (picpocket-header-dir))
+                "/"
+                (propertize
+                 (picpocket-escape-percent (picpocket-file))
+                 'face 'picpocket-header-file)
+                (if (> (length (picpocket-all-files picpocket-current)) 1)
+                    "+"
+                  ""))
+        (when picpocket-debug
+          picpocket-header-text)
+        (picpocket-maybe-kb)
+        (picpocket-scale-info)
+        (picpocket-rotation-info)
+        (picpocket-format-tags (picpocket-tags picpocket-current)
+                               (cl-set-difference (picpocket-dir-tags
+                                                   picpocket-current)
+                                                  (picpocket-tags
+                                                   picpocket-current)))
+        (picpocket-filter-info)
+        (when picpocket-idle-f-header-info
+          (picpocket-idle-f-info)))))
 
 (defun picpocket-join (&rest strings)
   (mapconcat 'identity
@@ -4894,13 +5605,30 @@ This command picks the first undoable command in that list."
     (unless (zerop degrees)
       (format "%s°" (truncate degrees)))))
 
-(defun picpocket-format-tags (tags)
-  (if (stringp tags)
-      (picpocket-format-tags (picpocket-tags-string-to-list tags))
-    (when tags
-      (cl-case picpocket-tags-style
-        (:org (format ":%s:" (mapconcat #'symbol-name tags ":")))
-        (t (format "(%s)" (mapconcat #'symbol-name tags " ")))))))
+(defun picpocket-format-tags (tags &optional dir-tags)
+  (when (stringp tags)
+    (setq tags (picpocket-tags-string-to-list tags)))
+  (unless picpocket-consider-dir-as-tag
+    (setq dir-tags nil))
+  (when (stringp dir-tags)
+    (setq dir-tags (picpocket-tags-string-to-list dir-tags)))
+  (when (or tags dir-tags)
+    (cl-case picpocket-tags-style
+      (:org (picpocket-do-format-tag ":%s%s%s:" ":" tags dir-tags))
+      (t (picpocket-do-format-tag "(%s%s%s)" " " tags dir-tags)))))
+
+(defun picpocket-do-format-tag (format-string delim tags &optional dir-tags)
+  (format format-string
+          (mapconcat #'symbol-name tags delim)
+                 (if (and tags dir-tags) delim "")
+                 (propertize (mapconcat #'symbol-name dir-tags delim)
+                             'face 'picpocket-dir-tags-face)))
+
+(defun picpocket-tags-string (pic)
+  (or (picpocket-format-tags (picpocket-tags pic)) "-"))
+
+(defun picpocket-dir-tags-string (pic)
+  (or (picpocket-format-tags nil (picpocket-dir-tags pic)) "-"))
 
 (defun picpocket-filter-info ()
   (when picpocket-filter
@@ -4918,8 +5646,10 @@ This command picks the first undoable command in that list."
                #'picpocket-maybe-update-keymap)
   (remove-hook 'buffer-list-update-hook
                #'picpocket-maybe-rescale)
-  (remove-hook 'focus-in-hook
-               #'picpocket-focus)
+  ;; PENDING use after-focus-change-function instead...?
+  (with-no-warnings
+    (remove-hook 'focus-in-hook
+                 #'picpocket-focus))
   (remove-hook 'minibuffer-setup-hook
                #'picpocket-minibuffer-setup)
   (remove-hook 'minibuffer-exit-hook
@@ -4972,13 +5702,6 @@ This command picks the first undoable command in that list."
 
 ;;; Debug functions
 
-;; PENDING call at start, finish and interrupt of idle functions...
-(defun picpocket-debug2 (format &optional args)
-  (apply #'message format args))
-;; (update-header-debug-thing...)
-;; (scroll-message-buffer-if-visible...))
-
-
 (defun picpocket-debug (s format &rest args)
   (when picpocket-debug
     (setq picpocket-sum (time-add picpocket-sum s))
@@ -4993,32 +5716,31 @@ This command picks the first undoable command in that list."
 (defun picpocket-dump ()
   "Print some picpocket variables."
   (interactive)
-  (picpocket-bye-command
-    (with-current-buffer (get-buffer-create picpocket-dump-buffer)
-      (erase-buffer))
-    (picpocket-dump-var 'picpocket-list)
-    (picpocket-dump-var 'picpocket-current)
-    (picpocket-dump-var 'picpocket-index)
-    (picpocket-dump-var 'picpocket-list-length)
-    (picpocket-dump-var 'picpocket-filter)
-    (picpocket-dump-var 'picpocket-fatal)
-    (picpocket-dump-var 'picpocket-recursive)
-    (picpocket-dump-var 'picpocket-version)
-    (picpocket-dump-var 'picpocket-entry-function)
-    (picpocket-dump-var 'picpocket-entry-args)
-    (picpocket-dump-var 'picpocket-picture-regexp)
-    (picpocket-dump-var 'image-type-file-name-regexps)
-    (picpocket-dump-some "pp-current-pos"
-                         (picpocket-simplify-pos (picpocket-current-pos)))
-    (picpocket-dump-some "pp-next-pos"
-                         (picpocket-simplify-pos (picpocket-next-pos)))
-    (picpocket-dump-some "pp-prev-pos"
-                         (picpocket-simplify-pos (picpocket-previous-pos)))
-    (picpocket-dump-some "dir-files"
-                         (directory-files default-directory nil "^[^.]" t))
-    (picpocket-dump-some "pp-file-list"
-                         (picpocket-file-list default-directory))
-    (switch-to-buffer picpocket-dump-buffer)))
+  (with-current-buffer (get-buffer-create picpocket-dump-buffer)
+    (erase-buffer))
+  (picpocket-dump-var 'picpocket-list)
+  (picpocket-dump-var 'picpocket-current)
+  (picpocket-dump-var 'picpocket-index)
+  (picpocket-dump-var 'picpocket-list-length)
+  (picpocket-dump-var 'picpocket-filter)
+  (picpocket-dump-var 'picpocket-fatal)
+  (picpocket-dump-var 'picpocket-recursive)
+  (picpocket-dump-var 'picpocket-version)
+  (picpocket-dump-var 'picpocket-entry-function)
+  (picpocket-dump-var 'picpocket-entry-args)
+  (picpocket-dump-var 'picpocket-picture-regexp)
+  (picpocket-dump-var 'image-type-file-name-regexps)
+  (picpocket-dump-some "pp-current-pos"
+                       (picpocket-simplify-pos (picpocket-current-pos)))
+  (picpocket-dump-some "pp-next-pos"
+                       (picpocket-simplify-pos (picpocket-next-pos)))
+  (picpocket-dump-some "pp-prev-pos"
+                       (picpocket-simplify-pos (picpocket-previous-pos)))
+  (picpocket-dump-some "dir-files"
+                       (directory-files default-directory nil "^[^.]" t))
+  (picpocket-dump-some "pp-file-list"
+                       (picpocket-file-list default-directory))
+  (switch-to-buffer picpocket-dump-buffer))
 
 (defun picpocket-dump-some (name value)
   (with-current-buffer picpocket-dump-buffer
@@ -5067,8 +5789,8 @@ With the prev links it is harder to follow the list."
     (rename "Renamed")
     (hardlink "Hard linked")))
 
-;; PENDING - just for comparing between single-linked and
-;; double-linked list.
+;; PENDING - just for comparing performance between single-linked and
+;; double-linked lists.
 (defun picpocket-backwards ()
   "Move backwards without using double-linked list."
   (interactive)
@@ -5083,6 +5805,31 @@ With the prev links it is harder to follow the list."
                                              :index (1- picpocket-index)))
       (message "Back %s" time))))
 
+(defun picpocket-warn (format &rest args)
+  (let ((format (concat "picpocket-warn: " format)))
+    (apply #'message format args)
+    (unless picpocket-demote-warnings
+      (apply #'warn format args))))
+
+;; PENDING - keeping this debug stuff for now.
+(defvar picpocket-start (current-time))
+(defun picpocket-msg (&rest args)
+  (when nil
+    (with-current-buffer (get-buffer-create "*piclog*")
+      (save-excursion
+        (goto-char (point-max))
+        (insert (format "%f %s\n"
+                        (time-to-seconds (time-since picpocket-start))
+                        (mapconcat (lambda (x)
+                                     (if (stringp x)
+                                         x
+                                       (prin1-to-string x)))
+                                   args
+                                   " ")))))))
+
+(cl-loop for f in picpocket-list-commands
+         for list-f = (intern (concat (symbol-name f) "-in-list"))
+         do (put list-f 'function-documentation (documentation f)))
 
 (provide 'picpocket)
 
