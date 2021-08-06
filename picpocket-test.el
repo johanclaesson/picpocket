@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanwclaesson@gmail.com>
 ;; URL: https://github.com/johanclaesson/picpocket
-;; Version: 41
+;; Version: 42
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -1052,7 +1052,22 @@ warm/red.svg"
     (should (equal (picpocket-tags) '(manga)))
     (delete-directory "subdir" t)))
 
-
+(ert-deftest picpocket-with-mini-buffer ()
+  :tags '(:picpocket)
+  (picpocket-with-test-buffer
+    (picpocket-toggle-mini-window)
+    (picpocket-end)
+    (picpocket-home)
+    (picpocket-next)
+    (picpocket-next)
+    (picpocket-previous)
+    (picpocket-previous)
+    (picpocket-delete-file)
+    (should (eq 2 (length picpocket-list)))
+    (picpocket-delete-file)
+    (should (eq 1 (length picpocket-list)))
+    (picpocket-delete-file)
+    (picpocket-list-should-be-reset)))
 
 (provide 'picpocket-test)
 
