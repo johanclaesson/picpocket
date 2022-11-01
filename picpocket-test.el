@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017 Johan Claesson
 ;; Author: Johan Claesson <johanwclaesson@gmail.com>
 ;; URL: https://github.com/johanclaesson/picpocket
-;; Version: 42
+;; Version: 43
 ;; Keywords: multimedia
 ;; Package-Requires: ((emacs "24.4"))
 
@@ -81,8 +81,8 @@
   (declare (debug (body))
            (indent defun))
   `(let* ((picpocket-test-dir (or picpocket-test-dir
-                             (file-name-as-directory
-                              (make-temp-file "picpocket-test-" t))))
+                                  (file-name-as-directory
+                                   (make-temp-file "picpocket-test-" t))))
           (picpocket-db-dir picpocket-test-dir)
           (picpocket-db nil)
           (picpocket-db-journal-size 0)
